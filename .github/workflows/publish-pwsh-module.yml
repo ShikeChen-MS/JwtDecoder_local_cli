@@ -1,0 +1,217 @@
+name: Publish PowerShell module to PSGallery
+
+# Manual-only — publishing is a deliberate action. To release:
+#
+#   1. git tag v1.0.1 && git push origin v1.0.1
+#   2. Actions tab -> "Publish PowerShell module to PSGallery" ->
+#      "Run workflow" -> switch the ref dropdown to the tag.
+#   3. (First run is dry_run=true by default. Approve in the Actions
+#      UI to exercise the dry-run path end-to-end.)
+#   4. Re-run with dry_run=false to actually publish, then approve.
+#
+# The git tag is the single source of truth for the module's version.
+# The workflow rewrites JwtDecoder.psd1's ModuleVersion to match the
+# tag before publishing, so the committed value doesn't have to stay
+# in sync with releases.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (Publish-PSResource -WhatIf, no actual upload)'
+        type: boolean
+        required: true
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  PROJECT: src/JwtDecoder.PowerShell/JwtDecoder.PowerShell.csproj
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Job 1: validate the tag, build the module, run tests, pre-check the
+  # gallery. NO secrets and NO environment gate, so a failure here costs
+  # nothing and the approval prompt for publish doesn't fire until we
+  # know the artifact is good.
+  # ---------------------------------------------------------------------
+  validate:
+    name: Build and validate (no secrets)
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+
+    steps:
+      - name: Reject non-tag refs
+        shell: pwsh
+        run: |
+          if ('${{ github.ref_type }}' -ne 'tag') {
+            throw "This workflow must be run against a tag (e.g. v1.0.0), not '${{ github.ref }}'. In the 'Run workflow' UI, switch the 'Use workflow from' dropdown to the tag."
+          }
+          Write-Host "Tag: ${{ github.ref_name }}"
+
+      - name: Parse and validate version from tag
+        id: parse
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'
+          if ($tag -notmatch '^v(\d+\.\d+\.\d+(?:\.\d+)?)$') {
+            throw "Tag '$tag' must look like vMAJOR.MINOR.PATCH (optionally .REVISION). Examples: v1.0.0, v1.0.0.1"
+          }
+          $version = $Matches[1]
+          Write-Host "Module version: $version"
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        shell: pwsh
+        run: dotnet restore "$env:PROJECT"
+
+      - name: Publish module (dotnet)
+        shell: pwsh
+        run: dotnet publish "$env:PROJECT" -c Release --no-restore
+
+      - name: Stage module + rewrite ModuleVersion to the tag's version
+        shell: pwsh
+        run: |
+          $publishDir = "src/JwtDecoder.PowerShell/bin/Release/net8.0/publish"
+          $version    = '${{ steps.parse.outputs.version }}'
+          $stageRoot  = Join-Path $env:RUNNER_TEMP 'publish-stage'
+          $moduleDir  = Join-Path $stageRoot 'JwtDecoder'
+
+          if (Test-Path $stageRoot) { Remove-Item $stageRoot -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $moduleDir | Out-Null
+
+          # Copy runtime files only (no PDBs, no XML docs).
+          Get-ChildItem -LiteralPath $publishDir -File |
+            Where-Object { $_.Extension -notin @('.pdb', '.xml') } |
+            ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $moduleDir $_.Name) -Force }
+
+          # Targeted regex rewrite of the ModuleVersion line. Safer than
+          # Update-ModuleManifest, which can reformat unrelated fields.
+          $manifestPath = Join-Path $moduleDir 'JwtDecoder.psd1'
+          $content = Get-Content -Raw -LiteralPath $manifestPath
+          $updated = $content -replace "(?m)^(\s*ModuleVersion\s*=\s*)'[^']+'", "`${1}'$version'"
+          if ($updated -eq $content) {
+            throw "Failed to update ModuleVersion in $manifestPath (regex matched nothing)."
+          }
+          Set-Content -LiteralPath $manifestPath -Value $updated -NoNewline
+
+          # Independently re-validate that the manifest now reports the tag version.
+          $m = Test-ModuleManifest -Path $manifestPath
+          if ($m.Version -ne [Version]$version) {
+            throw "Manifest version $($m.Version) does not match tag version $version after rewrite."
+          }
+
+          Write-Host "Staged JwtDecoder $version at: $moduleDir"
+          Get-ChildItem $moduleDir | Format-Table Name, Length
+
+      - name: Functional tests against the staged module
+        shell: pwsh
+        run: |
+          $manifestPath = Join-Path $env:RUNNER_TEMP 'publish-stage' 'JwtDecoder' 'JwtDecoder.psd1'
+          ./tools/Test-JwtDecoderModule.ps1 -ModulePath $manifestPath
+
+      - name: Pre-check PSGallery — refuse to re-publish an existing version
+        shell: pwsh
+        run: |
+          $version = '${{ steps.parse.outputs.version }}'
+          $found = $null
+          try {
+            # Find-PSResource writes an error if not found; suppress it so
+            # we can distinguish "not present" (good) from "present" (block).
+            $found = Find-PSResource -Name JwtDecoder -Version $version -Repository PSGallery -ErrorAction SilentlyContinue 2>$null
+          } catch { }
+          if ($found) {
+            throw "JwtDecoder $version is already published to PSGallery. Bump the tag and try again."
+          }
+          Write-Host "PSGallery does not yet have JwtDecoder $version. Clear to publish."
+
+      - name: Upload staged module for the publish job
+        uses: actions/upload-artifact@v4
+        with:
+          name: publish-stage
+          path: ${{ runner.temp }}/publish-stage
+          if-no-files-found: error
+          retention-days: 1
+
+  # ---------------------------------------------------------------------
+  # Job 2: publish. Gated by the `powershell-gallery` environment, which
+  # requires manual approval AND restricts deployments to v* tags. The
+  # API key only becomes available once the environment gate is passed.
+  # ---------------------------------------------------------------------
+  publish:
+    name: Publish to PowerShell Gallery
+    needs: validate
+    runs-on: windows-latest
+    environment: powershell-gallery
+
+    # Job-level permissions: contents: read for checkout; id-token and
+    # attestations: write are needed by actions/attest-build-provenance
+    # below. The validate job keeps the workflow-level read-only scope.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Download staged module
+        uses: actions/download-artifact@v4
+        with:
+          name: publish-stage
+          path: ${{ runner.temp }}/stage
+
+      - name: Publish-PSResource (dry-run or live)
+        shell: pwsh
+        env:
+          # Secret is scoped to this environment; no other workflow / job
+          # / branch can read it. Never echoed; GitHub also auto-masks it
+          # in logs as a defense-in-depth measure.
+          PSG_KEY: ${{ secrets.POWERSHELL_GALLERY_API_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:PSG_KEY)) {
+            throw "POWERSHELL_GALLERY_API_KEY secret is not set on the 'powershell-gallery' environment."
+          }
+
+          $modulePath = Join-Path '${{ runner.temp }}' 'stage' 'JwtDecoder'
+          if (-not (Test-Path (Join-Path $modulePath 'JwtDecoder.psd1'))) {
+            throw "Staged module not found at $modulePath"
+          }
+
+          $version = '${{ needs.validate.outputs.version }}'
+          if ('${{ inputs.dry_run }}' -eq 'true') {
+            Write-Host "DRY RUN: invoking Publish-PSResource -WhatIf (no upload)."
+            Publish-PSResource -Path $modulePath -Repository PSGallery -ApiKey $env:PSG_KEY -WhatIf -Verbose
+            Write-Host ""
+            Write-Host "Dry run complete. Re-run this workflow with dry_run=false to publish v$version."
+          } else {
+            Publish-PSResource -Path $modulePath -Repository PSGallery -ApiKey $env:PSG_KEY -Verbose
+            Write-Host ""
+            Write-Host "Published JwtDecoder $version"
+            Write-Host "URL: https://www.powershellgallery.com/packages/JwtDecoder/$version"
+          }
+
+      # Mint a Sigstore-backed build provenance attestation for the exact
+      # files we just published to PSGallery. Skipped on dry runs so the
+      # attestation log only contains records of real releases. The
+      # attestation lives in this repo's attestation log and is verifiable
+      # against the published package via SHA-256:
+      #
+      #   gh attestation verify <downloaded.nupkg-or-extracted-file> --owner ShikeChen-MS
+      - name: Attest build provenance
+        if: ${{ success() && !inputs.dry_run }}
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            ${{ runner.temp }}/stage/JwtDecoder/JwtDecoder.psd1
+            ${{ runner.temp }}/stage/JwtDecoder/JwtDecoder.PowerShell.dll
+            ${{ runner.temp }}/stage/JwtDecoder/JwtDecoder.Core.dll
