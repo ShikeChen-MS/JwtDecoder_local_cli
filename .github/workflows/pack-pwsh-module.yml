@@ -1,0 +1,115 @@
+name: Package PowerShell module (local install)
+
+on:
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: 'Build configuration'
+        type: choice
+        required: true
+        default: 'Release'
+        options:
+          - Release
+          - Debug
+
+permissions:
+  contents: read
+
+env:
+  PROJECT: src/JwtDecoder.PowerShell/JwtDecoder.PowerShell.csproj
+
+jobs:
+  package:
+    name: Build, self-test, and upload module zip
+    # The module is pure managed code (net8.0) and works on every PowerShell
+    # 7.4+ host (Windows, Linux, macOS). One Windows build runner is enough.
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Show .NET info
+        shell: pwsh
+        run: dotnet --info
+
+      - name: Restore
+        shell: pwsh
+        run: dotnet restore "$env:PROJECT"
+
+      - name: Publish module
+        shell: pwsh
+        run: >
+          dotnet publish "$env:PROJECT"
+          -c ${{ inputs.configuration }}
+          --no-restore
+
+      - name: Stage artifact
+        id: stage
+        shell: pwsh
+        run: |
+          $publishDir = "src/JwtDecoder.PowerShell/bin/${{ inputs.configuration }}/net8.0/publish"
+          if (-not (Test-Path $publishDir)) {
+            throw "Publish output not found: $publishDir"
+          }
+
+          # Read the version from the freshly-built manifest so the artifact
+          # name carries the actual module version.
+          $manifest = Test-ModuleManifest -Path (Join-Path $publishDir 'JwtDecoder.psd1')
+          $version  = $manifest.Version
+          $sha7     = "${{ github.sha }}".Substring(0, 7)
+          $stageName = "JwtDecoder-PowerShell-Module-$version-$sha7"
+          $stageRoot = Join-Path $env:RUNNER_TEMP $stageName
+          $moduleDir = Join-Path $stageRoot 'Module'
+
+          if (Test-Path $stageRoot) { Remove-Item $stageRoot -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $moduleDir | Out-Null
+
+          # Copy the runtime files (skip PDBs / XML docs / NuGet leftovers).
+          Get-ChildItem -LiteralPath $publishDir -File |
+            Where-Object { $_.Extension -notin @('.pdb', '.xml') } |
+            ForEach-Object {
+              Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $moduleDir $_.Name) -Force
+            }
+
+          # Drop the local installer + a quick-start README at the top level
+          # of the artifact so the user sees them immediately on extract.
+          Copy-Item 'tools/Install-PackagedModule.ps1'        (Join-Path $stageRoot 'Install-PackagedModule.ps1') -Force
+          Copy-Item 'tools/Install-PackagedModule.README.txt' (Join-Path $stageRoot 'README.txt')                 -Force
+
+          Write-Host "Staged artifact contents:"
+          Get-ChildItem -Recurse $stageRoot | Format-Table FullName, Length
+
+          "stageRoot=$stageRoot" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "stageName=$stageName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "version=$version"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # Run the installer end-to-end on the runner so we never publish an
+      # artifact whose installer is broken. This exercises the same code
+      # path an end-user will hit on Windows.
+      - name: Self-test installer (PSEdition + version detection + install)
+        shell: pwsh
+        run: |
+          $stageRoot = "${{ steps.stage.outputs.stageRoot }}"
+          & (Join-Path $stageRoot 'Install-PackagedModule.ps1') -Scope CurrentUser -Force
+
+          Import-Module JwtDecoder -Force
+          $cmds = Get-Command -Module JwtDecoder
+          if (-not $cmds) { throw "No cmdlets exported by JwtDecoder after install." }
+          Write-Host "Module loaded; cmdlets: $($cmds.Name -join ', ')"
+
+      # actions/upload-artifact@v4 always wraps its input in a zip when the
+      # user downloads the artifact, so uploading the staged DIRECTORY (not
+      # a pre-built zip) avoids the zip-inside-a-zip experience.
+      - name: Upload artifact zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.stage.outputs.stageName }}
+          path: ${{ steps.stage.outputs.stageRoot }}/*
+          if-no-files-found: error
+          retention-days: 30

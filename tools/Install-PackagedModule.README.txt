@@ -1,0 +1,76 @@
+JwtDecoder PowerShell Module — local install package
+=====================================================
+
+This zip contains a pre-built PowerShell 7.4+ binary module and a small
+installer script that drops it into your PowerShell module path. The
+install is fully OFFLINE: nothing is downloaded and the module never
+makes network calls at runtime.
+
+Layout
+------
+
+    Install-PackagedModule.ps1   The installer (run this).
+    README.txt                   This file.
+    Module/
+        JwtDecoder.psd1          Module manifest.
+        JwtDecoder.PowerShell.dll
+        JwtDecoder.Core.dll
+        README.md                Module-local docs.
+
+Requirements
+------------
+
+PowerShell 7.4 or later (Core edition). Windows PowerShell 5.1 is NOT
+supported and the installer refuses to run on it.
+
+Install
+-------
+
+1. Extract this zip into a folder of your choice.
+2. Open PowerShell 7+ ("pwsh") in that folder.
+3. Run the installer:
+
+       pwsh ./Install-PackagedModule.ps1
+
+   Or, for a machine-wide install (needs admin / sudo):
+
+       pwsh ./Install-PackagedModule.ps1 -Scope AllUsers
+
+   To overwrite an existing install at the same version:
+
+       pwsh ./Install-PackagedModule.ps1 -Force
+
+Windows: execution policy
+-------------------------
+
+If Windows blocks the script with a "running scripts is disabled" error,
+either unblock the file once:
+
+       Unblock-File ./Install-PackagedModule.ps1
+
+or invoke the installer with an explicit bypass:
+
+       pwsh -ExecutionPolicy Bypass -File ./Install-PackagedModule.ps1
+
+After install
+-------------
+
+       Import-Module JwtDecoder
+       Get-Command -Module JwtDecoder
+       ConvertFrom-JsonWebToken '<your-jwt>'
+
+Uninstall
+---------
+
+The installer copies into
+
+    <PSModulePath>/JwtDecoder/<Version>/
+
+so removing that directory is enough. For example, for a CurrentUser
+install on Windows:
+
+       Remove-Item -Recurse "$([Environment]::GetFolderPath('MyDocuments'))\PowerShell\Modules\JwtDecoder"
+
+or on Linux/macOS:
+
+       rm -rf "$HOME/.local/share/powershell/Modules/JwtDecoder"
