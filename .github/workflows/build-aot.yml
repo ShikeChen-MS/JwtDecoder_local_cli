@@ -11,6 +11,16 @@ on:
         options:
           - Release
           - Debug
+  # Run on every push to master so a regression never sits unbuilt.
+  push:
+    branches:
+      - master
+  # Periodic refresh: runs at 06:00 UTC on the 1st and 21st of every
+  # month. Worst-case gap between runs is exactly 20 days (day 1 to
+  # day 21 within the same month), so the build is exercised at most
+  # 20 days apart even if nothing is pushed.
+  schedule:
+    - cron: '0 6 1,21 * *'
 
 permissions:
   contents: read
@@ -21,6 +31,9 @@ permissions:
 
 env:
   PROJECT: src/JwtDecoder/JwtDecoder.csproj
+  # Push and schedule events have no workflow inputs, so fall back to
+  # 'Release' for non-dispatch runs.
+  CONFIGURATION: ${{ inputs.configuration || 'Release' }}
 
 jobs:
   build:
@@ -83,7 +96,7 @@ jobs:
         shell: pwsh
         run: >
           dotnet publish "$env:PROJECT"
-          -c ${{ inputs.configuration }}
+          -c $env:CONFIGURATION
           -r ${{ matrix.rid }}
           --no-restore
 
@@ -91,7 +104,7 @@ jobs:
         id: locate
         shell: pwsh
         run: |
-          $publishDir = "src/JwtDecoder/bin/${{ inputs.configuration }}/net10.0/${{ matrix.rid }}/publish"
+          $publishDir = "src/JwtDecoder/bin/$env:CONFIGURATION/net10.0/${{ matrix.rid }}/publish"
           $bin = Join-Path $publishDir '${{ matrix.exe }}'
           if (-not (Test-Path $bin)) {
             Write-Error "Expected output not found: $bin"
@@ -129,7 +142,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: jwtdecode-${{ matrix.rid }}-${{ inputs.configuration }}-${{ github.sha }}
+          name: jwtdecode-${{ matrix.rid }}-${{ env.CONFIGURATION }}-${{ github.sha }}
           path: ${{ steps.locate.outputs.binPath }}
           if-no-files-found: error
           retention-days: 30
