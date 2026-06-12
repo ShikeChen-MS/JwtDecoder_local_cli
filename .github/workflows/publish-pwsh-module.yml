@@ -155,6 +155,14 @@ jobs:
     runs-on: windows-latest
     environment: powershell-gallery
 
+    # Job-level permissions: contents: read for checkout; id-token and
+    # attestations: write are needed by actions/attest-build-provenance
+    # below. The validate job keeps the workflow-level read-only scope.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
     steps:
       - name: Download staged module
         uses: actions/download-artifact@v4
@@ -191,3 +199,19 @@ jobs:
             Write-Host "Published JwtDecoder $version"
             Write-Host "URL: https://www.powershellgallery.com/packages/JwtDecoder/$version"
           }
+
+      # Mint a Sigstore-backed build provenance attestation for the exact
+      # files we just published to PSGallery. Skipped on dry runs so the
+      # attestation log only contains records of real releases. The
+      # attestation lives in this repo's attestation log and is verifiable
+      # against the published package via SHA-256:
+      #
+      #   gh attestation verify <downloaded.nupkg-or-extracted-file> --owner ShikeChen-MS
+      - name: Attest build provenance
+        if: ${{ success() && !inputs.dry_run }}
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            ${{ runner.temp }}/stage/JwtDecoder/JwtDecoder.psd1
+            ${{ runner.temp }}/stage/JwtDecoder/JwtDecoder.PowerShell.dll
+            ${{ runner.temp }}/stage/JwtDecoder/JwtDecoder.Core.dll
