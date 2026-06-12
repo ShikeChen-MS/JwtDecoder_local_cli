@@ -104,13 +104,14 @@ jobs:
           Write-Host "Built ${{ matrix.exe }} ($sizeMB MB) for ${{ matrix.rid }}"
           "binPath=$bin" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      # Every entry in the matrix runs on its own native architecture, so the
-      # smoke test runs unconditionally.
-      - name: Smoke test
+      # Every matrix entry runs on its own native architecture, so the
+      # functional tests run unconditionally. They exercise every supported
+      # algorithm family plus the documented security hardening (algorithm
+      # confusion, private-key refusal, curve binding, oversized input,
+      # duplicate header keys, terminal-injection guard, alg=none, ...).
+      - name: Functional tests (samples/)
         shell: pwsh
-        run: |
-          & "${{ steps.locate.outputs.binPath }}" --version
-          & "${{ steps.locate.outputs.binPath }}" --help
+        run: ./tools/Test-AotBuild.ps1 -BinPath "${{ steps.locate.outputs.binPath }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
