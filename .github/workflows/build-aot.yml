@@ -1,4 +1,4 @@
-name: Build AOT CLI (jwtdecode.exe)
+name: Build AOT CLI (cross-platform)
 
 on:
   workflow_dispatch:
@@ -16,15 +16,38 @@ permissions:
   contents: read
 
 env:
-  RUNTIME: win-x64
   PROJECT: src/JwtDecoder/JwtDecoder.csproj
 
 jobs:
   build:
-    name: Publish Native AOT (win-x64)
-    # windows-latest images ship with Visual Studio Build Tools (MSVC C++),
-    # which Native AOT requires for linking on Windows.
-    runs-on: windows-latest
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      # Don't cancel siblings if one platform fails; we still want the others.
+      fail-fast: false
+      matrix:
+        include:
+          - label: windows-x64
+            runner: windows-latest
+            rid: win-x64
+            exe: jwtdecode.exe
+          - label: windows-arm64
+            runner: windows-11-arm
+            rid: win-arm64
+            exe: jwtdecode.exe
+          - label: linux-x64
+            runner: ubuntu-latest
+            rid: linux-x64
+            exe: jwtdecode
+          - label: linux-arm64
+            runner: ubuntu-24.04-arm
+            rid: linux-arm64
+            exe: jwtdecode
+          - label: macos-arm64
+            runner: macos-latest
+            rid: osx-arm64
+            exe: jwtdecode
 
     steps:
       - name: Checkout
@@ -36,44 +59,63 @@ jobs:
           dotnet-version: '10.0.x'
 
       - name: Show .NET info
+        shell: pwsh
         run: dotnet --info
 
-      - name: Restore
-        run: dotnet restore "$env:PROJECT" -r $env:RUNTIME
+      # Native AOT on Linux needs clang + zlib headers for the final native link.
+      # ubuntu-latest typically already has them; install is idempotent and cheap.
+      - name: Install Linux AOT dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang zlib1g-dev
 
-      - name: Publish (Native AOT, single file)
+      - name: Restore
+        shell: pwsh
+        run: dotnet restore "$env:PROJECT" -r ${{ matrix.rid }}
+
+      - name: Publish (Native AOT)
+        shell: pwsh
         run: >
           dotnet publish "$env:PROJECT"
           -c ${{ inputs.configuration }}
-          -r $env:RUNTIME
+          -r ${{ matrix.rid }}
           --no-restore
 
-      - name: Locate published exe
+      - name: Locate published binary
         id: locate
         shell: pwsh
         run: |
-          $publishDir = "src/JwtDecoder/bin/${{ inputs.configuration }}/net10.0/$env:RUNTIME/publish"
-          $exe = Join-Path $publishDir 'jwtdecode.exe'
-          if (-not (Test-Path $exe)) {
-            Write-Error "Expected output not found: $exe"
-            Get-ChildItem -Recurse $publishDir -ErrorAction SilentlyContinue | Format-Table FullName, Length
+          $publishDir = "src/JwtDecoder/bin/${{ inputs.configuration }}/net10.0/${{ matrix.rid }}/publish"
+          $bin = Join-Path $publishDir '${{ matrix.exe }}'
+          if (-not (Test-Path $bin)) {
+            Write-Error "Expected output not found: $bin"
+            if (Test-Path $publishDir) {
+              Get-ChildItem -Recurse $publishDir | Format-Table FullName, Length
+            }
             exit 1
           }
-          $sizeMB = [math]::Round((Get-Item $exe).Length / 1MB, 2)
-          Write-Host "Built jwtdecode.exe ($sizeMB MB)"
-          "publishDir=$publishDir" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "exePath=$exe"           | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          # Make sure the binary is executable on Unix runners (publish usually does
+          # this already, but we set it explicitly so the smoke test never fails for
+          # a permissions reason).
+          if ($IsLinux -or $IsMacOS) { chmod +x $bin }
+          $sizeMB = [math]::Round((Get-Item $bin).Length / 1MB, 2)
+          Write-Host "Built ${{ matrix.exe }} ($sizeMB MB) for ${{ matrix.rid }}"
+          "binPath=$bin" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
+      # Every entry in the matrix runs on its own native architecture, so the
+      # smoke test runs unconditionally.
       - name: Smoke test
         shell: pwsh
         run: |
-          & "${{ steps.locate.outputs.exePath }}" --version
-          & "${{ steps.locate.outputs.exePath }}" --help
+          & "${{ steps.locate.outputs.binPath }}" --version
+          & "${{ steps.locate.outputs.binPath }}" --help
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: jwtdecode-win-x64-${{ inputs.configuration }}-${{ github.sha }}
-          path: ${{ steps.locate.outputs.exePath }}
+          name: jwtdecode-${{ matrix.rid }}-${{ inputs.configuration }}-${{ github.sha }}
+          path: ${{ steps.locate.outputs.binPath }}
           if-no-files-found: error
           retention-days: 30
