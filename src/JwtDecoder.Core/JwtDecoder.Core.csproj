@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>JwtDecoder.Core</RootNamespace>
+    <AssemblyName>JwtDecoder.Core</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- This library must be AOT-safe so the CLI's PublishAot still works. -->
+    <IsAotCompatible>true</IsAotCompatible>
+    <!-- Trimmer-safe & analyzer-driven warnings. -->
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+
+    <Version>1.0.0</Version>
+    <AssemblyTitle>JwtDecoder.Core</AssemblyTitle>
+    <Description>Offline, hardened JSON Web Token decoding + verification library. Shared by the jwtdecode CLI and the JwtDecoder PowerShell module.</Description>
+  </PropertyGroup>
+
+</Project>

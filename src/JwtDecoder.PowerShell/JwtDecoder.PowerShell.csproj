@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>JwtDecoder.PowerShell</RootNamespace>
+    <AssemblyName>JwtDecoder.PowerShell</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <!-- Don't generate AssemblyVersion auto-properties that conflict with the .psd1 -->
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+
+    <Version>1.0.0</Version>
+    <AssemblyTitle>JwtDecoder PowerShell Module</AssemblyTitle>
+    <Description>Offline JSON Web Token decode + verify cmdlets for PowerShell 7.4+ (binary module).</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\JwtDecoder.Core\JwtDecoder.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Reference-only assembly: provides the cmdlet base classes at build time only.
+         PowerShell itself supplies System.Management.Automation at runtime. -->
+    <PackageReference Include="PowerShellStandard.Library" Version="5.1.1" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Ship the manifest + module-local README alongside the DLL on publish. -->
+    <None Include="JwtDecoder.psd1" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="README.md" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

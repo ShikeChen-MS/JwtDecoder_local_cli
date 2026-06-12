@@ -1,0 +1,29 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>JwtDecoder</RootNamespace>
+    <AssemblyName>jwtdecode</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
+    <!-- Native AOT: single, self-contained, dependency-free exe. -->
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <StripSymbols>true</StripSymbols>
+    <IlcOptimizationPreference>Size</IlcOptimizationPreference>
+
+    <!-- Identity -->
+    <Version>1.0.0</Version>
+    <AssemblyTitle>jwtdecode</AssemblyTitle>
+    <Description>Offline JSON Web Token decoder and (optional) signature verifier.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\JwtDecoder.Core\JwtDecoder.Core.csproj" />
+  </ItemGroup>
+
+</Project>

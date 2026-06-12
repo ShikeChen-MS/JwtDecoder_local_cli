@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/JwtDecoder.Core/JwtDecoder.Core.csproj" />
+    <Project Path="src/JwtDecoder.PowerShell/JwtDecoder.PowerShell.csproj" />
+    <Project Path="src/JwtDecoder/JwtDecoder.csproj" />
+  </Folder>
+</Solution>

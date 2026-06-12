@@ -1,0 +1,24 @@
+## Build outputs
+[Bb]in/
+[Oo]bj/
+[Oo]ut/
+[Pp]ublish/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## Visual Studio / Rider
+.vs/
+.idea/
+*.swp
+*.tmp
+
+## .NET
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+## OS
+.DS_Store
+Thumbs.db
