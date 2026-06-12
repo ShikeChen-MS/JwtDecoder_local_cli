@@ -1,0 +1,79 @@
+name: Build AOT CLI (jwtdecode.exe)
+
+on:
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: 'Build configuration'
+        type: choice
+        required: true
+        default: 'Release'
+        options:
+          - Release
+          - Debug
+
+permissions:
+  contents: read
+
+env:
+  RUNTIME: win-x64
+  PROJECT: src/JwtDecoder/JwtDecoder.csproj
+
+jobs:
+  build:
+    name: Publish Native AOT (win-x64)
+    # windows-latest images ship with Visual Studio Build Tools (MSVC C++),
+    # which Native AOT requires for linking on Windows.
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Show .NET info
+        run: dotnet --info
+
+      - name: Restore
+        run: dotnet restore "$env:PROJECT" -r $env:RUNTIME
+
+      - name: Publish (Native AOT, single file)
+        run: >
+          dotnet publish "$env:PROJECT"
+          -c ${{ inputs.configuration }}
+          -r $env:RUNTIME
+          --no-restore
+
+      - name: Locate published exe
+        id: locate
+        shell: pwsh
+        run: |
+          $publishDir = "src/JwtDecoder/bin/${{ inputs.configuration }}/net10.0/$env:RUNTIME/publish"
+          $exe = Join-Path $publishDir 'jwtdecode.exe'
+          if (-not (Test-Path $exe)) {
+            Write-Error "Expected output not found: $exe"
+            Get-ChildItem -Recurse $publishDir -ErrorAction SilentlyContinue | Format-Table FullName, Length
+            exit 1
+          }
+          $sizeMB = [math]::Round((Get-Item $exe).Length / 1MB, 2)
+          Write-Host "Built jwtdecode.exe ($sizeMB MB)"
+          "publishDir=$publishDir" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "exePath=$exe"           | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          & "${{ steps.locate.outputs.exePath }}" --version
+          & "${{ steps.locate.outputs.exePath }}" --help
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jwtdecode-win-x64-${{ inputs.configuration }}-${{ github.sha }}
+          path: ${{ steps.locate.outputs.exePath }}
+          if-no-files-found: error
+          retention-days: 30
