@@ -14,6 +14,10 @@ on:
 
 permissions:
   contents: read
+  # Needed by actions/attest-build-provenance to mint the Sigstore OIDC
+  # token and to record the attestation in the repo's attestation log.
+  id-token: write
+  attestations: write
 
 env:
   PROJECT: src/JwtDecoder/JwtDecoder.csproj
@@ -112,6 +116,15 @@ jobs:
       - name: Functional tests (samples/)
         shell: pwsh
         run: ./tools/Test-AotBuild.ps1 -BinPath "${{ steps.locate.outputs.binPath }}"
+
+      # Mint a Sigstore-backed build provenance attestation for the binary
+      # we just tested. Anyone who downloads the artifact can later run
+      # `gh attestation verify <file> --owner ShikeChen-MS` to confirm it
+      # came from this workflow, this repo, and this commit.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.locate.outputs.binPath }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

@@ -14,6 +14,10 @@ on:
 
 permissions:
   contents: read
+  # Needed by actions/attest-build-provenance to mint the Sigstore OIDC
+  # token and to record the attestation in the repo's attestation log.
+  id-token: write
+  attestations: write
 
 env:
   PROJECT: src/JwtDecoder.PowerShell/JwtDecoder.PowerShell.csproj
@@ -113,6 +117,19 @@ jobs:
       - name: Functional tests (samples/)
         shell: pwsh
         run: ./tools/Test-JwtDecoderModule.ps1
+
+      # Mint a Sigstore-backed build provenance attestation for the files
+      # users will actually load or execute: the module DLLs, the manifest,
+      # and the installer script. Anyone who downloads the artifact can
+      # later run `gh attestation verify <file> --owner ShikeChen-MS` to
+      # confirm each file came from this workflow, this repo, this commit.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            ${{ steps.stage.outputs.stageRoot }}/Install-PackagedModule.ps1
+            ${{ steps.stage.outputs.stageRoot }}/Module/*.dll
+            ${{ steps.stage.outputs.stageRoot }}/Module/*.psd1
 
       # actions/upload-artifact@v4 always wraps its input in a zip when the
       # user downloads the artifact, so uploading the staged DIRECTORY (not
