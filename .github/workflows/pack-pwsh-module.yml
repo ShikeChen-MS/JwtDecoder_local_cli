@@ -103,6 +103,17 @@ jobs:
           if (-not $cmds) { throw "No cmdlets exported by JwtDecoder after install." }
           Write-Host "Module loaded; cmdlets: $($cmds.Name -join ', ')"
 
+      # Sample-driven functional tests against the just-installed module.
+      # Mirrors tools/Test-AotBuild.ps1 for the CLI: exercises every supported
+      # algorithm family, every -Key* parameter set, time-status handling,
+      # and the documented security hardening (algorithm confusion, private-
+      # key refusal, JOSE curve binding, duplicate header keys, oversized
+      # input, alg=none rejection). The artifact is only uploaded if every
+      # case passes.
+      - name: Functional tests (samples/)
+        shell: pwsh
+        run: ./tools/Test-JwtDecoderModule.ps1
+
       # actions/upload-artifact@v4 always wraps its input in a zip when the
       # user downloads the artifact, so uploading the staged DIRECTORY (not
       # a pre-built zip) avoids the zip-inside-a-zip experience.
