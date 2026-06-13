@@ -14,7 +14,9 @@ name: Publish release (PSGallery + GitHub Release)
 #
 # Release procedure:
 #
-#   git tag v1.0.1 && git push origin v1.0.1
+#   git tag v1.0.1 && git push origin v1.0.1   # OR `git tag 1.0.1` -- both
+#                                                # forms accepted; the 'v' is
+#                                                # stripped before publishing.
 #   Actions tab -> "Publish release (PSGallery + GitHub Release)" ->
 #       "Run workflow" -> switch the ref dropdown to the tag.
 #   First run leaves dry_run=true; approve in the Actions UI to exercise
@@ -63,12 +65,19 @@ jobs:
         shell: bash
         run: |
           tag='${{ github.ref_name }}'
-          if [[ ! "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?)$ ]]; then
-            echo "::error::Tag '$tag' must look like vMAJOR.MINOR.PATCH (optionally .REVISION). Examples: v1.0.0, v1.0.0.1"
+          # Accept tags with OR without a leading 'v' (e.g. v1.0.0 or 1.0.0).
+          # The PowerShell Gallery's published version is ALWAYS the bare
+          # numeric form — the 'v' is for git/GitHub convention only.
+          version="${tag#v}"
+          version="${version#V}"
+
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::Tag '$tag' does not look like a version. Must match MAJOR.MINOR.PATCH (optionally .REVISION), with or without a leading 'v'. Examples: v1.0.0, 1.0.0, v1.0.0.1"
             exit 1
           fi
-          version="${BASH_REMATCH[1]}"
-          echo "Module/CLI version: $version"
+
+          echo "Tag        : $tag"
+          echo "Version    : $version (the bare form; no v prefix)"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
   # ---------------------------------------------------------------------
@@ -324,16 +333,40 @@ jobs:
           }
 
           $modulePath = Join-Path '${{ runner.temp }}' 'stage' 'JwtDecoder'
-          if (-not (Test-Path (Join-Path $modulePath 'JwtDecoder.psd1'))) {
-            throw "Staged module not found at $modulePath"
+          $manifestPath = Join-Path $modulePath 'JwtDecoder.psd1'
+          if (-not (Test-Path $manifestPath)) {
+            throw "Staged manifest not found at $manifestPath"
           }
 
+          # Diagnostics: print exactly what's about to be published so a
+          # future failure log shows the resolved version unambiguously.
           $version = '${{ needs.prep.outputs.version }}'
+          $m = Test-ModuleManifest -Path $manifestPath
+          $manifestVersion = "$($m.Version)"
+          Write-Host "Tag-derived version (from prep)      : '$version'"
+          Write-Host "Manifest ModuleVersion (Test-Manifest): '$manifestVersion'"
+          Write-Host "ModuleVersion line in staged psd1    :"
+          Select-String -Path $manifestPath -Pattern '^\s*ModuleVersion' | ForEach-Object { Write-Host "    $($_.Line)" }
+
+          # Pre-publish sanity: PSGallery accepts only bare numeric NuGet
+          # versions. Refuse anything that smells like a v-prefixed tag or
+          # has stray whitespace before we even talk to the gallery, so the
+          # failure (if any) is local and clearly labelled.
+          if ($manifestVersion -match '^[vV]') {
+            throw "Pre-publish sanity check: manifest ModuleVersion '$manifestVersion' starts with 'v'. PSGallery would reject this. Check the validate-module job's rewrite step."
+          }
+          if ($manifestVersion -match '\s') {
+            throw "Pre-publish sanity check: manifest ModuleVersion '$manifestVersion' contains whitespace. PSGallery would reject this."
+          }
+          if ($manifestVersion -ne $version) {
+            throw "Pre-publish sanity check: manifest version '$manifestVersion' does not equal tag-derived version '$version'."
+          }
+
           if ('${{ inputs.dry_run }}' -eq 'true') {
             Write-Host "DRY RUN: invoking Publish-PSResource -WhatIf (no upload)."
             Publish-PSResource -Path $modulePath -Repository PSGallery -ApiKey $env:PSG_KEY -WhatIf -Verbose
             Write-Host ""
-            Write-Host "Dry run complete. Re-run this workflow with dry_run=false to publish v$version."
+            Write-Host "Dry run complete. Re-run this workflow with dry_run=false to publish version $version."
           } else {
             Publish-PSResource -Path $modulePath -Repository PSGallery -ApiKey $env:PSG_KEY -Verbose
             Write-Host ""
