@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>JwtDecoder.JwksFetcher</RootNamespace>
+    <AssemblyName>JwtDecoder.JwksFetcher</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- Must stay AOT-safe so the JwksFetch CLI's PublishAot still works. -->
+    <IsAotCompatible>true</IsAotCompatible>
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+
+    <Version>1.0.0</Version>
+    <AssemblyTitle>JwtDecoder.JwksFetcher</AssemblyTitle>
+    <Description>JWKS acquisition and OIDC discovery companion library for JwtDecoder.Core. Network-capable: fetches a JWKS (or discovers one via OIDC), validates it, selects the JWK matching a JWT's kid/alg/crv, and emits the public key as PEM.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\JwtDecoder.Core\JwtDecoder.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="JwtDecoder.JwksFetcher.Tests" />
+  </ItemGroup>
+
+</Project>
