@@ -4,4 +4,8 @@
     <Project Path="src/JwtDecoder.PowerShell/JwtDecoder.PowerShell.csproj" />
     <Project Path="src/JwtDecoder/JwtDecoder.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/JwtDecoder.Core.Tests/JwtDecoder.Core.Tests.csproj" />
+    <Project Path="tests/JwtDecoder.Tests/JwtDecoder.Tests.csproj" />
+  </Folder>
 </Solution>

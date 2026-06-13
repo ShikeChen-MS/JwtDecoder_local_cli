@@ -70,10 +70,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup .NET 10 SDK
+      - name: Setup .NET SDKs (8 for Core/PS module, 10 for CLI + tests)
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '10.0.x'
+          dotnet-version: |
+            8.0.x
+            10.0.x
 
       - name: Show .NET info
         shell: pwsh
@@ -87,6 +89,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang zlib1g-dev
+
+      # Run the full unit-test suite (Core library + CLI argument parser)
+      # on this matrix entry's runner BEFORE any AOT publish or artifact
+      # upload. A failure here aborts the job and the artifact step never
+      # runs, so a regression cannot ship. Runs on every platform so a
+      # platform-specific crypto regression cannot slip past one runner.
+      - name: Run unit tests (dotnet test)
+        shell: pwsh
+        run: dotnet test -c $env:CONFIGURATION --logger "console;verbosity=normal"
 
       - name: Restore
         shell: pwsh

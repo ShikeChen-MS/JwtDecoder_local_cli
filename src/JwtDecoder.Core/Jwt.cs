@@ -170,6 +170,27 @@ public sealed class Jwt : IDisposable
         return false;
     }
 
+    /// <summary>
+    /// Resolve a textual query path (e.g. <c>payload.sub</c>, <c>header.alg</c>,
+    /// <c>payload.roles[0]</c>, or the shorthand <c>sub</c> ≡ <c>payload.sub</c>) against this
+    /// decoded JWT.
+    /// </summary>
+    /// <param name="path">The query path. See <see cref="JwtQueryPath"/> for the grammar.</param>
+    /// <param name="value">On success, the matched <see cref="JsonElement"/>. The element is
+    /// backed by this <see cref="Jwt"/>'s internal <see cref="JsonDocument"/>s and is only valid
+    /// until <see cref="Dispose"/> is called. Call <see cref="JsonElement.Clone"/> if you need
+    /// to retain the value beyond that.</param>
+    /// <returns><c>true</c> if the path resolved (including to a JSON <c>null</c>); <c>false</c>
+    /// if any segment did not match.</returns>
+    /// <exception cref="ArgumentNullException">If <paramref name="path"/> is null.</exception>
+    /// <exception cref="FormatException">If <paramref name="path"/> is syntactically invalid.</exception>
+    public bool TryQuery(string path, out JsonElement value) => JwtQuery.TryQuery(this, path, out value);
+
+    /// <summary>
+    /// Resolve a textual query path against this JWT, returning <c>null</c> if not found.
+    /// </summary>
+    public JsonElement? Query(string path) => JwtQuery.Query(this, path);
+
     private static string StripBearerAndWhitespace(string token)
     {
         string t = token.Trim().Trim('"', '\'');

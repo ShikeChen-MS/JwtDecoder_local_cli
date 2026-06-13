@@ -99,10 +99,21 @@ jobs:
         with:
           ref: ${{ github.ref }}
 
-      - name: Setup .NET 8 SDK
+      - name: Setup .NET SDKs (8 for PS module + Core, 10 for tests)
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      # Tests gate the entire release: a single failing test must abort the
+      # job, and (because publish-module / publish-nuget depend on this job)
+      # also abort every downstream publish. Runs the full Core + CLI parser
+      # suite even though this job only builds the PS module — the cmdlets
+      # call straight through to Core, so Core coverage protects the module.
+      - name: Run unit tests (dotnet test)
+        shell: pwsh
+        run: dotnet test -c Release --logger "console;verbosity=normal"
 
       - name: Restore
         shell: pwsh
@@ -225,10 +236,12 @@ jobs:
         with:
           ref: ${{ github.ref }}
 
-      - name: Setup .NET 10 SDK
+      - name: Setup .NET SDKs (8 for Core/PS module, 10 for CLI + tests)
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '10.0.x'
+          dotnet-version: |
+            8.0.x
+            10.0.x
 
       - name: Install Linux AOT dependencies
         if: runner.os == 'Linux'
@@ -236,6 +249,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang zlib1g-dev
+
+      # Tests run on every CLI matrix entry BEFORE the AOT publish so a
+      # platform-specific crypto regression (e.g. an ECDsa difference between
+      # OS providers) fails the job before any binary is built or attested.
+      - name: Run unit tests (dotnet test)
+        shell: pwsh
+        run: dotnet test -c Release --logger "console;verbosity=normal"
 
       - name: Restore
         shell: pwsh

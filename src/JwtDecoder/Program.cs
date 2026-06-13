@@ -99,6 +99,48 @@ internal static class Program
             {
                 if (opts.Verify) verifyOutcome = JwtVerifier.Verify(jwt, key);
 
+                if (opts.Query is not null)
+                {
+                    // SECURITY: if the caller asked us to verify and verification failed, do NOT
+                    // emit any query value on stdout. A downstream pipeline that ignores the exit
+                    // code must not be able to consume claims from an unverified or invalid token
+                    // (e.g. alg=none, wrong-key signature). The query value is suppressed; only a
+                    // stderr diagnostic is written, and we return exit 3 just like the standard
+                    // verify-failed path.
+                    if (verifyOutcome is { Verified: false })
+                    {
+                        Console.Error.WriteLine(
+                            "Error: signature verification failed; refusing to emit query output for an unverified token.");
+                        if (!string.IsNullOrEmpty(verifyOutcome.Error))
+                            Console.Error.WriteLine($"detail: {verifyOutcome.Error}");
+                        return 3;
+                    }
+
+                    int notFoundIndex;
+                    string missing;
+                    try
+                    {
+                        notFoundIndex = Output.WriteQueryResults(Console.Out, jwt, opts.Query, opts.Raw, out missing);
+                    }
+                    catch (FormatException ex)
+                    {
+                        Console.Error.WriteLine($"Error: invalid query path: {ex.Message}");
+                        return 2;
+                    }
+                    catch (InvalidDataException ex)
+                    {
+                        // Control-character refusal under --raw. Nothing was written to stdout.
+                        Console.Error.WriteLine($"Error: {ex.Message}");
+                        return 2;
+                    }
+                    if (notFoundIndex >= 0)
+                    {
+                        Console.Error.WriteLine($"Error: query path '{missing}' not found in token.");
+                        return 2;
+                    }
+                    return 0;
+                }
+
                 if (opts.Detailed) Output.WriteDetailed(Console.Out, jwt, verifyOutcome);
                 else               Output.WriteSimplified(Console.Out, jwt, verifyOutcome);
 
