@@ -535,14 +535,33 @@ jobs:
         with:
           subject-path: ./nupkgs/*.nupkg
 
-      - name: Push to nuget.org
+      # Exchange this run's GitHub OIDC token for a short-lived,
+      # single-use nuget.org API key. Requires:
+      #   - id-token: write permission on this job (already set above).
+      #   - A "Trusted Publishing" policy configured on nuget.org for
+      #     the JwtDecoder.Core package, matching:
+      #         Repository owner : ShikeChen-MS
+      #         Repository       : JwtDecoder_local_cli
+      #         Workflow file    : publish-pwsh-module.yml
+      #         Environment      : powershell-gallery   (optional)
+      #   - The `NUGET_USER` repository or environment variable set to
+      #     the NuGet.org account username that owns the policy.
+      # No long-lived API key is stored anywhere.
+      - name: Log in to nuget.org (OIDC trusted publishing)
+        if: ${{ !inputs.dry_run }}
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ vars.NUGET_USER }}
+
+      - name: Push to nuget.org (trusted publishing via OIDC)
         if: ${{ !inputs.dry_run }}
         env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+          NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
         shell: bash
         run: |
           if [ -z "${NUGET_API_KEY:-}" ]; then
-            echo "::error::NUGET_API_KEY is not set on the 'powershell-gallery' environment. Add it as an environment secret."
+            echo "::error::NuGet/login did not produce a short-lived API key. Check that nuget.org's trusted publishing policy for JwtDecoder.Core matches this repo + workflow file (publish-pwsh-module.yml)."
             exit 1
           fi
           # Pushing the .nupkg also pushes the matching .snupkg as a
