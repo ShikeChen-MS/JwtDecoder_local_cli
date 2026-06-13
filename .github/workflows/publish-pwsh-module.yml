@@ -1,4 +1,4 @@
-name: Publish release (PSGallery + GitHub Release)
+name: Publish release (PSGallery + NuGet + GitHub Release)
 
 # Manual-only. Cuts a formal release by doing all of the following from a
 # single approval:
@@ -9,7 +9,9 @@ name: Publish release (PSGallery + GitHub Release)
 #      (Native AOT, with Sigstore build-provenance attestations).
 #   4. Publish the module to PowerShell Gallery (environment-gated;
 #      requires manual approval; dry-run by default).
-#   5. Create a GitHub Release at the tag with all 5 CLI binaries
+#   5. Pack + publish JwtDecoder.Core to nuget.org and GitHub Packages
+#      (environment-gated; dry-run by default).
+#   6. Create a GitHub Release at the tag with all 5 CLI binaries
 #      attached as assets (skipped entirely on dry runs).
 #
 # Release procedure:
@@ -17,17 +19,18 @@ name: Publish release (PSGallery + GitHub Release)
 #   git tag v1.0.1 && git push origin v1.0.1   # OR `git tag 1.0.1` -- both
 #                                                # forms accepted; the 'v' is
 #                                                # stripped before publishing.
-#   Actions tab -> "Publish release (PSGallery + GitHub Release)" ->
+#   Actions tab -> "Publish release (PSGallery + NuGet + GitHub Release)" ->
 #       "Run workflow" -> switch the ref dropdown to the tag.
 #   First run leaves dry_run=true; approve in the Actions UI to exercise
-#   the dry-run paths end-to-end (no PSGallery upload, no GitHub Release).
-#   Re-run with dry_run=false, approve again -- this is the live release.
+#   the dry-run paths end-to-end (no PSGallery upload, no NuGet push, no
+#   GitHub Release). Re-run with dry_run=false, approve again -- this is
+#   the live release.
 
 on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Dry run (no PSGallery upload, no GitHub Release created)'
+        description: 'Dry run (no PSGallery upload, no NuGet push, no GitHub Release)'
         type: boolean
         required: true
         default: true
@@ -36,6 +39,7 @@ permissions:
   contents: read
 
 env:
+  PROJECT_CORE:   src/JwtDecoder.Core/JwtDecoder.Core.csproj
   PROJECT_MODULE: src/JwtDecoder.PowerShell/JwtDecoder.PowerShell.csproj
   PROJECT_CLI:    src/JwtDecoder/JwtDecoder.csproj
 
@@ -427,14 +431,177 @@ jobs:
             ${{ runner.temp }}/stage/JwtDecoder/JwtDecoder.Core.dll
 
   # ---------------------------------------------------------------------
-  # Job 5: cut the GitHub Release at the tag with every CLI binary
+  # Job 5: pack + publish JwtDecoder.Core to nuget.org AND GitHub
+  # Packages. Gated by the same `powershell-gallery` environment that
+  # protects the PSGallery key, so a single approval covers both feeds.
+  # NuGet pushes use --skip-duplicate so retries after a partial failure
+  # don't re-publish the same .nupkg version.
+  # ---------------------------------------------------------------------
+  publish-nuget:
+    name: Publish JwtDecoder.Core to nuget.org + GitHub Packages
+    needs: [prep, validate-module, build-cli]
+    runs-on: ubuntu-latest
+    environment: powershell-gallery
+
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      packages: write   # required for the GitHub Packages push
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: dotnet pack (version overridden from tag)
+        shell: bash
+        run: |
+          version='${{ needs.prep.outputs.version }}'
+          echo "Packing JwtDecoder.Core $version"
+          dotnet pack "$PROJECT_CORE" \
+            -c Release \
+            -p:Version="$version" \
+            --output ./nupkgs
+          echo "--- nupkgs ---"
+          ls -la ./nupkgs/
+
+      # Self-test: build a throwaway console app that consumes the
+      # freshly-packed .nupkg and exercises the JwtTools surface, so a
+      # broken package never reaches the public feeds. Runs in dry-run
+      # too -- the more validation, the better.
+      - name: Self-test the .nupkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ needs.prep.outputs.version }}'
+          work=$(mktemp -d)
+          pushd "$work" >/dev/null
+          dotnet new console --output . --framework net8.0 --no-restore >/dev/null
+
+          cat > nuget.config <<EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <configuration>
+            <packageSources>
+              <clear />
+              <add key="local" value="$GITHUB_WORKSPACE/nupkgs" />
+              <add key="nuget" value="https://api.nuget.org/v3/index.json" />
+            </packageSources>
+          </configuration>
+          EOF
+
+          dotnet add package JwtDecoder.Core --version "$version"
+
+          cat > Program.cs <<'EOF'
+          using JwtDecoder.Core;
+          using System.Text;
+
+          var token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+          var secret = "your-256-bit-secret";
+
+          using (var jwt = JwtTools.Decode(token))
+          {
+              Console.WriteLine($"alg = {jwt.Algorithm}");
+              Console.WriteLine($"sub = {jwt.Payload.RootElement.GetProperty("sub").GetString()}");
+          }
+
+          var ok  = JwtTools.VerifyHmac(token, secret);
+          var bad = JwtTools.VerifyHmac(token, "wrong-secret");
+          Console.WriteLine($"verify(correct).Verified = {ok.Verified}");
+          Console.WriteLine($"verify(wrong).Verified   = {bad.Verified}");
+
+          var (j2, o2) = JwtTools.DecodeAndVerifyHmac(token, Encoding.UTF8.GetBytes(secret));
+          using (j2) Console.WriteLine($"DecodeAndVerifyHmac: alg={j2.Algorithm}, verified={o2.Verified}");
+
+          if (!ok.Verified || bad.Verified) Environment.Exit(1);
+          EOF
+
+          dotnet run --no-launch-profile
+          popd >/dev/null
+          rm -rf "$work"
+          echo "Self-test passed."
+
+      # Attest the .nupkg only on real publishes, so the attestation
+      # log isn't polluted with dry-run entries.
+      - name: Attest build provenance for nupkg
+        if: ${{ success() && !inputs.dry_run }}
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ./nupkgs/*.nupkg
+
+      # Exchange this run's GitHub OIDC token for a short-lived,
+      # single-use nuget.org API key. Requires:
+      #   - id-token: write permission on this job (already set above).
+      #   - A "Trusted Publishing" policy configured on nuget.org for
+      #     the JwtDecoder.Core package, matching:
+      #         Repository owner : ShikeChen-MS
+      #         Repository       : JwtDecoder_local_cli
+      #         Workflow file    : publish-pwsh-module.yml
+      #         Environment      : powershell-gallery   (optional)
+      #   - The `NUGET_USER` repository or environment variable set to
+      #     the NuGet.org account username that owns the policy.
+      # No long-lived API key is stored anywhere.
+      - name: Log in to nuget.org (OIDC trusted publishing)
+        if: ${{ !inputs.dry_run }}
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ vars.NUGET_USER }}
+
+      - name: Push to nuget.org (trusted publishing via OIDC)
+        if: ${{ !inputs.dry_run }}
+        env:
+          NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
+        shell: bash
+        run: |
+          if [ -z "${NUGET_API_KEY:-}" ]; then
+            echo "::error::NuGet/login did not produce a short-lived API key. Check that nuget.org's trusted publishing policy for JwtDecoder.Core matches this repo + workflow file (publish-pwsh-module.yml)."
+            exit 1
+          fi
+          # Pushing the .nupkg also pushes the matching .snupkg as a
+          # side-effect, so we glob both safely.
+          dotnet nuget push './nupkgs/*.nupkg' \
+            --source https://api.nuget.org/v3/index.json \
+            --api-key "$NUGET_API_KEY" \
+            --skip-duplicate
+
+      - name: Push to GitHub Packages
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          # GitHub Packages accepts the workflow's GITHUB_TOKEN as the
+          # API key (packages: write permission is granted above).
+          dotnet nuget push './nupkgs/*.nupkg' \
+            --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" \
+            --api-key "$GH_TOKEN" \
+            --skip-duplicate
+
+      - name: Dry-run summary
+        if: ${{ inputs.dry_run }}
+        shell: bash
+        run: |
+          echo "DRY RUN: would push these packages to nuget.org and GitHub Packages:"
+          ls -la ./nupkgs/
+
+  # ---------------------------------------------------------------------
+  # Job 6: cut the GitHub Release at the tag with every CLI binary
   # attached. Skipped entirely on dry runs. Idempotent: if the release
   # already exists (re-run after partial failure), the assets are
   # uploaded with --clobber instead of creating a duplicate release.
+  # Depends on every prior publishing job so the Release announcement
+  # only happens when both PSGallery and NuGet publishes have succeeded.
   # ---------------------------------------------------------------------
   create-release:
     name: Create GitHub Release with CLI assets
-    needs: [prep, build-cli, publish-module]
+    needs: [prep, build-cli, publish-module, publish-nuget]
     if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
 

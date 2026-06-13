@@ -15,7 +15,38 @@
 
     <Version>1.0.0</Version>
     <AssemblyTitle>JwtDecoder.Core</AssemblyTitle>
-    <Description>Offline, hardened JSON Web Token decoding + verification library. Shared by the jwtdecode CLI and the JwtDecoder PowerShell module.</Description>
+    <Description>Offline, hardened JSON Web Token decoding + verification library. Shared by the jwtdecode CLI and the JwtDecoder PowerShell module. AOT-safe, zero dependencies, algorithm-confusion guard, JOSE curve binding, zeroed-secret memory.</Description>
+
+    <!-- NuGet packaging metadata. The publish workflow overrides Version
+         at pack time via -p:Version=<tag-derived>. -->
+    <PackageId>JwtDecoder.Core</PackageId>
+    <Authors>JwtDecoder contributors</Authors>
+    <Company>JwtDecoder contributors</Company>
+    <Copyright>(c) JwtDecoder contributors. All rights reserved.</Copyright>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/ShikeChen-MS/JwtDecoder_local_cli</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/ShikeChen-MS/JwtDecoder_local_cli</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageTags>jwt;jsonwebtoken;security;crypto;offline;hmac;rsa;ecdsa;aot;hardened</PackageTags>
+    <PackageReleaseNotes>See https://github.com/ShikeChen-MS/JwtDecoder_local_cli/releases</PackageReleaseNotes>
+
+    <!-- Ship XML docs so consumers get IntelliSense. CS1591 suppresses
+         "missing XML comment" warnings for any members that don't have one. -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+
+    <!-- Ship a symbol package (.snupkg) alongside the main .nupkg so
+         consumers can step into the source via SourceLink later. -->
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- Embed the library-specific README in the .nupkg so it shows on
+         nuget.org and in IDE package browsers. -->
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
 </Project>
+
