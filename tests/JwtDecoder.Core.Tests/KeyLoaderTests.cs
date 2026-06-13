@@ -242,4 +242,98 @@ public class KeyLoaderTests
         foreach (var alg in expected)
             Assert.Contains(alg, KeyLoader.SupportedAlgorithms);
     }
+
+    // -----------------------------------------------------------------
+    // LoadFromBytes (public overload introduced in Phase 3 for --key-file -)
+    // -----------------------------------------------------------------
+
+    [Fact]
+    public void LoadFromBytes_HMAC_returns_secret_bytes()
+    {
+        byte[] secret = Encoding.UTF8.GetBytes("super-secret-value");
+        using var key = KeyLoader.LoadFromBytes(secret, "HS256");
+        Assert.Equal(KeyKind.Hmac, key.Kind);
+        Assert.Equal(secret, key.HmacBytes);
+    }
+
+    [Theory]
+    [InlineData("HS256")]
+    [InlineData("HS384")]
+    [InlineData("HS512")]
+    public void LoadFromBytes_HMAC_works_for_all_HS_algorithms(string alg)
+    {
+        byte[] secret = Encoding.UTF8.GetBytes("a-secret-long-enough-for-any-hash-12345678");
+        using var key = KeyLoader.LoadFromBytes(secret, alg);
+        Assert.Equal(KeyKind.Hmac, key.Kind);
+    }
+
+    [Fact]
+    public void LoadFromBytes_HMAC_with_PEM_looking_bytes_is_refused_as_algorithm_confusion()
+    {
+        byte[] pem = File.ReadAllBytes(TestSamples.Path("rs256-public.pem"));
+        var ex = Assert.Throws<InvalidDataException>(() => KeyLoader.LoadFromBytes(pem, "HS256"));
+        Assert.Contains("algorithm-confusion", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("RS256")]
+    [InlineData("PS256")]
+    public void LoadFromBytes_RSA_PEM_succeeds(string alg)
+    {
+        byte[] pem = File.ReadAllBytes(TestSamples.Path("rs256-public.pem"));
+        using var key = KeyLoader.LoadFromBytes(pem, alg);
+        Assert.Equal(KeyKind.Rsa, key.Kind);
+    }
+
+    [Fact]
+    public void LoadFromBytes_RSA_with_private_key_PEM_is_refused()
+    {
+        byte[] pem = File.ReadAllBytes(TestSamples.Path("rsa-private.pem"));
+        Assert.Throws<InvalidDataException>(() => KeyLoader.LoadFromBytes(pem, "RS256"));
+    }
+
+    [Fact]
+    public void LoadFromBytes_ES256_with_P256_PEM_succeeds()
+    {
+        byte[] pem = File.ReadAllBytes(TestSamples.Path("es256-public.pem"));
+        using var key = KeyLoader.LoadFromBytes(pem, "ES256");
+        Assert.Equal(KeyKind.Ecdsa, key.Kind);
+    }
+
+    [Fact]
+    public void LoadFromBytes_ES256_with_P384_PEM_refused()
+    {
+        byte[] pem = File.ReadAllBytes(TestSamples.Path("es384-public.pem"));
+        Assert.Throws<InvalidDataException>(() => KeyLoader.LoadFromBytes(pem, "ES256"));
+    }
+
+    [Fact]
+    public void LoadFromBytes_oversized_input_is_refused()
+    {
+        var huge = new byte[KeyLoader.MaxKeyFileBytes + 1];
+        Assert.Throws<InvalidDataException>(() => KeyLoader.LoadFromBytes(huge, "HS256"));
+    }
+
+    [Fact]
+    public void LoadFromBytes_empty_input_is_refused()
+    {
+        Assert.Throws<InvalidDataException>(() => KeyLoader.LoadFromBytes(ReadOnlySpan<byte>.Empty, "HS256"));
+    }
+
+    [Fact]
+    public void LoadFromBytes_unsupported_algorithm_throws()
+    {
+        Assert.Throws<NotSupportedException>(() =>
+            KeyLoader.LoadFromBytes(new byte[] { 1, 2, 3 }, "FOO"));
+    }
+
+    [Fact]
+    public void LoadFromBytes_copies_caller_buffer()
+    {
+        // Mutating the caller's buffer after the call must not affect the loaded key.
+        byte[] secret = Encoding.UTF8.GetBytes("original");
+        using var key = KeyLoader.LoadFromBytes(secret, "HS256");
+        secret.AsSpan().Clear();
+        Assert.Equal(Encoding.UTF8.GetBytes("original"), key.HmacBytes);
+    }
 }

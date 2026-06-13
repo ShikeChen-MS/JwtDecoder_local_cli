@@ -48,6 +48,9 @@ jwtdecode --file token.jwt -q 'payload.roles[0],payload.address.city'
 # verify the signature with a key file
 jwtdecode --file token.jwt --verify --key-file hs256-secret.txt
 jwtdecode --file token.jwt --verify --key-file rs256-public.pem
+
+# pipe the key on stdin (token must come from --file or a positional argument)
+type rs256-public.pem | jwtdecode --file token.jwt --verify --key-file -
 ```
 
 ## Quick start — PowerShell module
@@ -98,7 +101,7 @@ Test-JsonWebTokenSignature -Token $rsToken -PublicKey $rsa
 | `-q`, `--query <p>` | Print only the value(s) at the given path(s). Comma-separated for multiple. |
 | `--raw`             | With `--query`, unwrap string scalars (no JSON quotes).           |
 | `--verify`          | Verify the signature. Requires `--key-file`.                      |
-| `--key-file <path>` | Key file (HMAC raw secret or PEM-encoded RSA / EC PUBLIC key).    |
+| `--key-file <path>` | Key file (HMAC raw secret or PEM-encoded RSA / EC PUBLIC key). Use `-` to read the key bytes from stdin (the token must then come from `--file` or a positional argument). |
 | `-h`, `--help`      | Show help.                                                        |
 | `-v`, `--version`   | Show version.                                                     |
 

@@ -50,6 +50,46 @@ public static class KeyLoader
     }
 
     /// <summary>
+    /// Load a key from raw <paramref name="bytes"/> appropriate for the JWT's
+    /// <paramref name="algorithm"/>, applying the same hardening as
+    /// <see cref="Load(string, string)"/>: algorithm-confusion guard
+    /// (PEM-looking input rejected for HMAC algorithms), private-key refusal,
+    /// JOSE curve binding, and size cap.
+    /// </summary>
+    /// <param name="bytes">Raw key material. Must be ≤ <see cref="MaxKeyFileBytes"/>.</param>
+    /// <param name="algorithm">The JWT's <c>alg</c> header value.</param>
+    /// <remarks>
+    /// The input span is copied into a fresh buffer that is zeroed in a
+    /// <c>finally</c> block; callers should also zero their own buffer.
+    /// Intended for stdin / in-process key loading where the bytes are not
+    /// on disk.
+    /// </remarks>
+    public static KeyMaterial LoadFromBytes(ReadOnlySpan<byte> bytes, string algorithm)
+    {
+        if (!SupportedAlgorithms.Contains(algorithm))
+            throw new NotSupportedException(
+                $"Verification is not supported for algorithm '{algorithm}'. " +
+                "Supported: HS256/384/512, RS256/384/512, PS256/384/512, ES256/384/512.");
+
+        if (bytes.Length > MaxKeyFileBytes)
+            throw new InvalidDataException(
+                $"Key bytes exceed maximum size of {MaxKeyFileBytes:N0} bytes.");
+        if (bytes.IsEmpty)
+            throw new InvalidDataException("Key bytes are empty.");
+
+        byte[] copy = new byte[bytes.Length];
+        bytes.CopyTo(copy);
+        try
+        {
+            return LoadFromBytes(copy, algorithm);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(copy);
+        }
+    }
+
+    /// <summary>
     /// Build an HMAC <see cref="KeyMaterial"/> from raw secret bytes, with the same algorithm-confusion guard
     /// applied to file inputs (refusing input that looks like PEM).
     /// </summary>
