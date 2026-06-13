@@ -34,9 +34,9 @@
     PrivateData = @{
         PSData = @{
             Tags         = @('JWT', 'JsonWebToken', 'Security', 'Crypto', 'Offline', 'HMAC', 'RSA', 'ECDsa')
-            LicenseUri   = ''
-            ProjectUri   = ''
-            IconUri      = ''
+            LicenseUri   = 'https://github.com/ShikeChen-MS/JwtDecoder_local_cli/blob/master/LICENSE'
+            ProjectUri   = 'https://github.com/ShikeChen-MS/JwtDecoder_local_cli'
+            IconUri      = 'https://github.com/ShikeChen-MS.png'
             ReleaseNotes = @'
 1.0.0
 - Initial release.
