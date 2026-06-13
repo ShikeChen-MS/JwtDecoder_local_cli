@@ -320,6 +320,47 @@ jobs:
           name: publish-stage
           path: ${{ runner.temp }}/stage
 
+      # Workaround for a known PSResourceGet failure mode on fresh
+      # Windows runners: Publish-PSResource has DYNAMIC PARAMETERS that
+      # are resolved during parameter binding by reading the repository
+      # store at %LOCALAPPDATA%\PSResourceGet\PSResourceRepository.xml.
+      # On a runneradmin profile that has never used PSResourceGet, the
+      # parent directory doesn't exist and Publish-PSResource fails with
+      #
+      #   Cannot retrieve the dynamic parameters for the cmdlet.
+      #   Loading repository store failed: Could not find a part of the
+      #   path '...\PSResourceRepository.xml'.
+      #
+      # BEFORE its body ever runs. Pre-create the directory and invoke
+      # Get-PSResourceRepository (no dynamic parameters of its own) so
+      # the store is lazy-initialised with the default PSGallery entry.
+      - name: Initialise PSResourceGet repository store
+        shell: pwsh
+        run: |
+          $storeDir = Join-Path $env:LOCALAPPDATA 'PSResourceGet'
+          New-Item -ItemType Directory -Path $storeDir -Force | Out-Null
+          Write-Host "Store directory : $storeDir"
+
+          # Force PSResourceGet to materialise the store file with its
+          # default contents (PSGallery is a default registration).
+          Get-PSResourceRepository | Out-Null
+
+          $repos = Get-PSResourceRepository
+          if (-not $repos) {
+            throw "PSResourceGet has no registered repositories after init."
+          }
+          Write-Host "Registered repositories:"
+          $repos | Format-Table Name, Uri, Trusted, Priority -AutoSize | Out-String | Write-Host
+
+          $psg = Get-PSResourceRepository -Name PSGallery -ErrorAction SilentlyContinue
+          if (-not $psg) {
+            Write-Host "PSGallery not registered after init; registering now."
+            Register-PSResourceRepository -PSGallery -Trusted
+          } elseif (-not $psg.Trusted) {
+            # Mark trusted so Publish-PSResource doesn't prompt.
+            Set-PSResourceRepository -Name PSGallery -Trusted
+          }
+
       - name: Publish-PSResource (dry-run or live)
         shell: pwsh
         env:
