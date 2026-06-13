@@ -1,23 +1,31 @@
-name: Publish PowerShell module to PSGallery
+name: Publish release (PSGallery + GitHub Release)
 
-# Manual-only — publishing is a deliberate action. To release:
+# Manual-only. Cuts a formal release by doing all of the following from a
+# single approval:
 #
-#   1. git tag v1.0.1 && git push origin v1.0.1
-#   2. Actions tab -> "Publish PowerShell module to PSGallery" ->
-#      "Run workflow" -> switch the ref dropdown to the tag.
-#   3. (First run is dry_run=true by default. Approve in the Actions
-#      UI to exercise the dry-run path end-to-end.)
-#   4. Re-run with dry_run=false to actually publish, then approve.
+#   1. Validate the tag and parse the version.
+#   2. Build + functional-test the PowerShell module.
+#   3. Build + functional-test the AOT CLI on all 5 supported platforms
+#      (Native AOT, with Sigstore build-provenance attestations).
+#   4. Publish the module to PowerShell Gallery (environment-gated;
+#      requires manual approval; dry-run by default).
+#   5. Create a GitHub Release at the tag with all 5 CLI binaries
+#      attached as assets (skipped entirely on dry runs).
 #
-# The git tag is the single source of truth for the module's version.
-# The workflow rewrites JwtDecoder.psd1's ModuleVersion to match the
-# tag before publishing, so the committed value doesn't have to stay
-# in sync with releases.
+# Release procedure:
+#
+#   git tag v1.0.1 && git push origin v1.0.1
+#   Actions tab -> "Publish release (PSGallery + GitHub Release)" ->
+#       "Run workflow" -> switch the ref dropdown to the tag.
+#   First run leaves dry_run=true; approve in the Actions UI to exercise
+#   the dry-run paths end-to-end (no PSGallery upload, no GitHub Release).
+#   Re-run with dry_run=false, approve again -- this is the live release.
+
 on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Dry run (Publish-PSResource -WhatIf, no actual upload)'
+        description: 'Dry run (no PSGallery upload, no GitHub Release created)'
         type: boolean
         required: true
         default: true
@@ -26,42 +34,53 @@ permissions:
   contents: read
 
 env:
-  PROJECT: src/JwtDecoder.PowerShell/JwtDecoder.PowerShell.csproj
+  PROJECT_MODULE: src/JwtDecoder.PowerShell/JwtDecoder.PowerShell.csproj
+  PROJECT_CLI:    src/JwtDecoder/JwtDecoder.csproj
 
 jobs:
   # ---------------------------------------------------------------------
-  # Job 1: validate the tag, build the module, run tests, pre-check the
-  # gallery. NO secrets and NO environment gate, so a failure here costs
-  # nothing and the approval prompt for publish doesn't fire until we
-  # know the artifact is good.
+  # Job 1: parse and validate the tag. Trivially fast; both downstream
+  # build paths consume `version` so they can run in parallel.
   # ---------------------------------------------------------------------
-  validate:
-    name: Build and validate (no secrets)
-    runs-on: windows-latest
+  prep:
+    name: Validate tag and parse version
+    runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.parse.outputs.version }}
 
     steps:
       - name: Reject non-tag refs
-        shell: pwsh
+        shell: bash
         run: |
-          if ('${{ github.ref_type }}' -ne 'tag') {
-            throw "This workflow must be run against a tag (e.g. v1.0.0), not '${{ github.ref }}'. In the 'Run workflow' UI, switch the 'Use workflow from' dropdown to the tag."
-          }
-          Write-Host "Tag: ${{ github.ref_name }}"
+          if [ "${{ github.ref_type }}" != "tag" ]; then
+            echo "::error::This workflow must be run against a tag (e.g. v1.0.0), not '${{ github.ref }}'. In the 'Run workflow' UI, switch the 'Use workflow from' dropdown to the tag."
+            exit 1
+          fi
+          echo "Tag: ${{ github.ref_name }}"
 
-      - name: Parse and validate version from tag
+      - name: Parse version from tag
         id: parse
-        shell: pwsh
+        shell: bash
         run: |
-          $tag = '${{ github.ref_name }}'
-          if ($tag -notmatch '^v(\d+\.\d+\.\d+(?:\.\d+)?)$') {
-            throw "Tag '$tag' must look like vMAJOR.MINOR.PATCH (optionally .REVISION). Examples: v1.0.0, v1.0.0.1"
-          }
-          $version = $Matches[1]
-          Write-Host "Module version: $version"
-          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          tag='${{ github.ref_name }}'
+          if [[ ! "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?)$ ]]; then
+            echo "::error::Tag '$tag' must look like vMAJOR.MINOR.PATCH (optionally .REVISION). Examples: v1.0.0, v1.0.0.1"
+            exit 1
+          fi
+          version="${BASH_REMATCH[1]}"
+          echo "Module/CLI version: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
+  # ---------------------------------------------------------------------
+  # Job 2: build + functionally test the PowerShell module. Stages it
+  # for the publish-module job. NO secrets, NO environment gate.
+  # ---------------------------------------------------------------------
+  validate-module:
+    name: Build + test PowerShell module
+    needs: prep
+    runs-on: windows-latest
+
+    steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -74,24 +93,23 @@ jobs:
 
       - name: Restore
         shell: pwsh
-        run: dotnet restore "$env:PROJECT"
+        run: dotnet restore "$env:PROJECT_MODULE"
 
       - name: Publish module (dotnet)
         shell: pwsh
-        run: dotnet publish "$env:PROJECT" -c Release --no-restore
+        run: dotnet publish "$env:PROJECT_MODULE" -c Release --no-restore
 
       - name: Stage module + rewrite ModuleVersion to the tag's version
         shell: pwsh
         run: |
           $publishDir = "src/JwtDecoder.PowerShell/bin/Release/net8.0/publish"
-          $version    = '${{ steps.parse.outputs.version }}'
+          $version    = '${{ needs.prep.outputs.version }}'
           $stageRoot  = Join-Path $env:RUNNER_TEMP 'publish-stage'
           $moduleDir  = Join-Path $stageRoot 'JwtDecoder'
 
           if (Test-Path $stageRoot) { Remove-Item $stageRoot -Recurse -Force }
           New-Item -ItemType Directory -Force -Path $moduleDir | Out-Null
 
-          # Copy runtime files only (no PDBs, no XML docs).
           Get-ChildItem -LiteralPath $publishDir -File |
             Where-Object { $_.Extension -notin @('.pdb', '.xml') } |
             ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $moduleDir $_.Name) -Force }
@@ -112,7 +130,6 @@ jobs:
           $updated = [regex]::Replace($content, $pattern, "`${1}'$version'")
           Set-Content -LiteralPath $manifestPath -Value $updated -NoNewline
 
-          # Independently re-validate that the manifest now reports the tag version.
           $m = Test-ModuleManifest -Path $manifestPath
           if ($m.Version -ne [Version]$version) {
             throw "Manifest version $($m.Version) does not match tag version $version after rewrite."
@@ -130,11 +147,9 @@ jobs:
       - name: Pre-check PSGallery — refuse to re-publish an existing version
         shell: pwsh
         run: |
-          $version = '${{ steps.parse.outputs.version }}'
+          $version = '${{ needs.prep.outputs.version }}'
           $found = $null
           try {
-            # Find-PSResource writes an error if not found; suppress it so
-            # we can distinguish "not present" (good) from "present" (block).
             $found = Find-PSResource -Name JwtDecoder -Version $version -Repository PSGallery -ErrorAction SilentlyContinue 2>$null
           } catch { }
           if ($found) {
@@ -148,22 +163,142 @@ jobs:
           name: publish-stage
           path: ${{ runner.temp }}/publish-stage
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
   # ---------------------------------------------------------------------
-  # Job 2: publish. Gated by the `powershell-gallery` environment, which
-  # requires manual approval AND restricts deployments to v* tags. The
-  # API key only becomes available once the environment gate is passed.
+  # Job 3: build + functionally test the AOT CLI on every platform, name
+  # each binary for release, attest its provenance, upload as an
+  # artifact. Mirrors build-aot.yml but adds the release-friendly rename
+  # and is keyed off the tag's version.
   # ---------------------------------------------------------------------
-  publish:
-    name: Publish to PowerShell Gallery
-    needs: validate
+  build-cli:
+    name: Build CLI ${{ matrix.label }}
+    needs: prep
+    runs-on: ${{ matrix.runner }}
+
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: windows-x64
+            runner: windows-latest
+            rid: win-x64
+            exe: jwtdecode.exe
+          - label: windows-arm64
+            runner: windows-11-arm
+            rid: win-arm64
+            exe: jwtdecode.exe
+          - label: linux-x64
+            runner: ubuntu-latest
+            rid: linux-x64
+            exe: jwtdecode
+          - label: linux-arm64
+            runner: ubuntu-24.04-arm
+            rid: linux-arm64
+            exe: jwtdecode
+          - label: macos-arm64
+            runner: macos-latest
+            rid: osx-arm64
+            exe: jwtdecode
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Install Linux AOT dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang zlib1g-dev
+
+      - name: Restore
+        shell: pwsh
+        run: dotnet restore "$env:PROJECT_CLI" -r ${{ matrix.rid }}
+
+      - name: Publish (Native AOT)
+        shell: pwsh
+        run: >
+          dotnet publish "$env:PROJECT_CLI"
+          -c Release
+          -r ${{ matrix.rid }}
+          --no-restore
+
+      - name: Locate published binary
+        id: locate
+        shell: pwsh
+        run: |
+          $publishDir = "src/JwtDecoder/bin/Release/net10.0/${{ matrix.rid }}/publish"
+          $bin = Join-Path $publishDir '${{ matrix.exe }}'
+          if (-not (Test-Path $bin)) {
+            Write-Error "Expected output not found: $bin"
+            if (Test-Path $publishDir) { Get-ChildItem -Recurse $publishDir | Format-Table FullName, Length }
+            exit 1
+          }
+          if ($IsLinux -or $IsMacOS) { chmod +x $bin }
+          $sizeMB = [math]::Round((Get-Item $bin).Length / 1MB, 2)
+          Write-Host "Built ${{ matrix.exe }} ($sizeMB MB) for ${{ matrix.rid }}"
+          "binPath=$bin" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Functional tests (samples/)
+        shell: pwsh
+        run: ./tools/Test-AotBuild.ps1 -BinPath "${{ steps.locate.outputs.binPath }}"
+
+      - name: Rename to release-friendly asset name
+        id: rename
+        shell: pwsh
+        run: |
+          $version  = '${{ needs.prep.outputs.version }}'
+          $src      = '${{ steps.locate.outputs.binPath }}'
+          $hasExt   = '${{ matrix.exe }}'.EndsWith('.exe')
+          $ext      = if ($hasExt) { '.exe' } else { '' }
+          $assetName = "jwtdecode-$version-${{ matrix.rid }}$ext"
+          $assetPath = Join-Path $env:RUNNER_TEMP $assetName
+          Copy-Item -LiteralPath $src -Destination $assetPath -Force
+          if ($IsLinux -or $IsMacOS) { chmod +x $assetPath }
+          Write-Host "Asset: $assetPath"
+          "assetPath=$assetPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "assetName=$assetName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # Attest the renamed (release-ready) binary. The attestation is
+      # bound to the file's SHA-256, so it stays valid no matter what
+      # the file is renamed to downstream.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.rename.outputs.assetPath }}
+
+      - name: Upload CLI asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-release-${{ matrix.rid }}
+          path: ${{ steps.rename.outputs.assetPath }}
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------
+  # Job 4: publish the module to PSGallery. Gated by the
+  # `powershell-gallery` GitHub Environment (manual approval, tag-only
+  # deployment policy, environment secret).
+  # ---------------------------------------------------------------------
+  publish-module:
+    name: Publish module to PowerShell Gallery
+    needs: [prep, validate-module]
     runs-on: windows-latest
     environment: powershell-gallery
 
-    # Job-level permissions: contents: read for checkout; id-token and
-    # attestations: write are needed by actions/attest-build-provenance
-    # below. The validate job keeps the workflow-level read-only scope.
     permissions:
       contents: read
       id-token: write
@@ -193,7 +328,7 @@ jobs:
             throw "Staged module not found at $modulePath"
           }
 
-          $version = '${{ needs.validate.outputs.version }}'
+          $version = '${{ needs.prep.outputs.version }}'
           if ('${{ inputs.dry_run }}' -eq 'true') {
             Write-Host "DRY RUN: invoking Publish-PSResource -WhatIf (no upload)."
             Publish-PSResource -Path $modulePath -Repository PSGallery -ApiKey $env:PSG_KEY -WhatIf -Verbose
@@ -206,13 +341,8 @@ jobs:
             Write-Host "URL: https://www.powershellgallery.com/packages/JwtDecoder/$version"
           }
 
-      # Mint a Sigstore-backed build provenance attestation for the exact
-      # files we just published to PSGallery. Skipped on dry runs so the
-      # attestation log only contains records of real releases. The
-      # attestation lives in this repo's attestation log and is verifiable
-      # against the published package via SHA-256:
-      #
-      #   gh attestation verify <downloaded.nupkg-or-extracted-file> --owner ShikeChen-MS
+      # Attest the published-to-PSGallery bits. Skipped on dry runs so
+      # the attestation log only contains real releases.
       - name: Attest build provenance
         if: ${{ success() && !inputs.dry_run }}
         uses: actions/attest-build-provenance@v2
@@ -221,3 +351,62 @@ jobs:
             ${{ runner.temp }}/stage/JwtDecoder/JwtDecoder.psd1
             ${{ runner.temp }}/stage/JwtDecoder/JwtDecoder.PowerShell.dll
             ${{ runner.temp }}/stage/JwtDecoder/JwtDecoder.Core.dll
+
+  # ---------------------------------------------------------------------
+  # Job 5: cut the GitHub Release at the tag with every CLI binary
+  # attached. Skipped entirely on dry runs. Idempotent: if the release
+  # already exists (re-run after partial failure), the assets are
+  # uploaded with --clobber instead of creating a duplicate release.
+  # ---------------------------------------------------------------------
+  create-release:
+    name: Create GitHub Release with CLI assets
+    needs: [prep, build-cli, publish-module]
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Reject non-tag refs (defensive)
+        shell: bash
+        run: |
+          if [ "${{ github.ref_type }}" != "tag" ]; then
+            echo "::error::create-release can only run on a tag ref."
+            exit 1
+          fi
+
+      - name: Download all CLI release binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cli-release-*
+          path: ./assets
+          merge-multiple: true
+
+      - name: List downloaded assets
+        shell: bash
+        run: ls -la ./assets/
+
+      - name: Create or update GitHub Release with assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO:  ${{ github.repository }}
+        shell: bash
+        run: |
+          tag='${{ github.ref_name }}'
+          version='${{ needs.prep.outputs.version }}'
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists; uploading assets with --clobber."
+            gh release upload "$tag" ./assets/* --clobber
+          else
+            echo "Creating release $tag."
+            gh release create "$tag" \
+              --title  "JwtDecoder $version" \
+              --generate-notes \
+              --verify-tag \
+              ./assets/*
+          fi
+
+          echo ""
+          echo "Release URL: $(gh release view "$tag" --json url --jq .url)"
