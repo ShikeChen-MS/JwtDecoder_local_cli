@@ -7,6 +7,7 @@ Offline JSON Web Token decoder + signature verifier as PowerShell 7.4+ cmdlets.
 | Cmdlet | Purpose |
 |---|---|
 | `ConvertFrom-JsonWebToken` | Decode a JWT into a rich object with dot-accessible header/payload claims. |
+| `Get-JsonWebTokenClaim` | Return the value(s) at one or more query paths as typed PowerShell objects. |
 | `Test-JsonWebTokenSignature` | Verify the signature against a `-KeyFile`, `-Secret <SecureString>`, or `-PublicKey <RSA|ECDsa>`. |
 
 ## Quick start
@@ -21,6 +22,16 @@ $jwt = ConvertFrom-JsonWebToken $token
 $jwt.Algorithm        # HS256
 $jwt.Payload.sub      # 1234567890
 $jwt.Payload.name     # John Doe
+
+# Query specific claims directly (no intermediate object)
+Get-JsonWebTokenClaim $token -Name payload.sub          # 1234567890
+Get-JsonWebTokenClaim $token -Name sub                  # shorthand for payload.sub
+Get-JsonWebTokenClaim $token -Name header.alg, payload.exp
+Get-JsonWebTokenClaim $token -Name 'payload.roles[0]'
+Get-JsonWebTokenClaim -Path .\token.jwt -Name payload.address.city
+
+# Multi-name as comma-separated string also works
+Get-JsonWebTokenClaim $token -Name 'payload.sub,header.alg'
 
 # Verify with a file
 Test-JsonWebTokenSignature -Token $token -KeyFile .\hs256-secret.txt
@@ -37,6 +48,22 @@ Test-JsonWebTokenSignature -Token $rsToken -PublicKey $rsa
 # Pipeline + detailed
 Get-Content .\token.jwt -Raw | ConvertFrom-JsonWebToken -Detailed
 ```
+
+## Query path syntax
+
+Used by `Get-JsonWebTokenClaim -Name`. Same grammar as the CLI's `--query`:
+
+| Path                       | Meaning                                                       |
+| -------------------------- | ------------------------------------------------------------- |
+| `payload.sub`              | The `sub` claim in the payload.                               |
+| `header.alg`               | The `alg` parameter in the JOSE header.                       |
+| `sub`                      | Shorthand for `payload.sub`.                                  |
+| `payload.roles[0]`         | First element of the `roles` array.                           |
+| `payload.address.city`     | Nested property walk.                                         |
+| `payload."x5t#S256"`       | Quoted segment for keys with non-identifier characters.       |
+| `payload`                  | The whole payload object (returned as a `PSObject`).          |
+
+Returned values are typed: strings stay strings, numbers become `long` or `double`, booleans become `bool`, `null` becomes `$null`, JSON objects become `PSObject` (so you can keep using dot access), and arrays become `object[]`. A path that does not resolve emits a non-terminating `ItemNotFoundException` and produces no output for that path; other paths in the same call are still evaluated.
 
 ## Security
 

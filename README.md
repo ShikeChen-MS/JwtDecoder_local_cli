@@ -30,6 +30,21 @@ Get-Content token.jwt | jwtdecode
 # show everything, including raw base64 segments and signature bytes
 jwtdecode --file token.jwt --detailed
 
+# query a single claim (JSON form by default)
+jwtdecode --file token.jwt --query payload.sub          # -> "1234567890"
+
+# unwrap the string value with --raw
+jwtdecode --file token.jwt --query payload.sub --raw    # -> 1234567890
+
+# shorthand: bare names default to payload.<name>
+jwtdecode --file token.jwt -q sub
+
+# query multiple paths in one call (comma-separated)
+jwtdecode --file token.jwt -q payload.sub,header.alg,payload.exp
+
+# index into arrays and walk nested objects
+jwtdecode --file token.jwt -q 'payload.roles[0],payload.address.city'
+
 # verify the signature with a key file
 jwtdecode --file token.jwt --verify --key-file hs256-secret.txt
 jwtdecode --file token.jwt --verify --key-file rs256-public.pem
@@ -55,6 +70,15 @@ $jwt.Payload.sub              # 1234567890
 $jwt.Expiration               # [DateTimeOffset]
 $jwt | ConvertFrom-JsonWebToken -Detailed | Format-List
 
+# Query a single claim by path (returns the typed .NET value)
+Get-JsonWebTokenClaim $token -Name payload.sub          # 1234567890
+Get-JsonWebTokenClaim $token -Name sub                  # shorthand for payload.sub
+Get-JsonWebTokenClaim $token -Name header.alg           # HS256
+
+# Multiple paths — pass an array or a comma-separated string
+Get-JsonWebTokenClaim $token -Name payload.sub, payload.name, header.alg
+Get-JsonWebTokenClaim $token -Name 'payload.roles[0]', 'payload.address.city'
+
 # Verify — three parameter sets
 Test-JsonWebTokenSignature -Token $token -KeyFile .\hs256-secret.txt
 Test-JsonWebTokenSignature -Token $token -Secret (Read-Host -AsSecureString)
@@ -71,10 +95,27 @@ Test-JsonWebTokenSignature -Token $rsToken -PublicKey $rsa
 | `--file <path>`     | Read the JWT from a file.                                         |
 | (stdin)             | If neither positional nor `--file` is given, read from stdin.     |
 | `-d`, `--detailed`  | Also print raw segments and signature bytes (hex).                |
+| `-q`, `--query <p>` | Print only the value(s) at the given path(s). Comma-separated for multiple. |
+| `--raw`             | With `--query`, unwrap string scalars (no JSON quotes).           |
 | `--verify`          | Verify the signature. Requires `--key-file`.                      |
 | `--key-file <path>` | Key file (HMAC raw secret or PEM-encoded RSA / EC PUBLIC key).    |
 | `-h`, `--help`      | Show help.                                                        |
 | `-v`, `--version`   | Show version.                                                     |
+
+### Query path syntax
+
+| Path                       | Meaning                                                |
+| -------------------------- | ------------------------------------------------------ |
+| `payload.sub`              | The `sub` claim in the payload.                        |
+| `header.alg`               | The `alg` parameter in the JOSE header.                |
+| `sub`                      | Shorthand for `payload.sub` (bare names default to payload). |
+| `payload.roles[0]`         | First element of the `roles` array.                    |
+| `payload.address.city`     | Nested property walk.                                  |
+| `payload."x5t#S256"`       | Use quoted segments for keys with non-identifier chars. |
+| `payload`                  | The whole payload object.                              |
+| `payload.sub,header.alg`   | Multiple paths in one call; one value per line.        |
+
+Output is JSON-encoded by default — string values are emitted with their JSON quotes preserved and control characters left as `\uXXXX` escapes (terminal-injection-safe). Pass `--raw` to unwrap string scalars. Objects and arrays are always emitted as compact JSON. Missing paths exit with code `2`.
 
 ## PowerShell module reference
 
@@ -82,6 +123,8 @@ Test-JsonWebTokenSignature -Token $rsToken -PublicKey $rsa
 |---|---|
 | `ConvertFrom-JsonWebToken [-Token] <string> [-Detailed]` | Decode a JWT to a `DecodedJsonWebToken`. Pipeline-friendly. |
 | `ConvertFrom-JsonWebToken -Path <string> [-Detailed]` | Decode a JWT read from a file. |
+| `Get-JsonWebTokenClaim [-Token] <string> -Name <string[]>` | Return the value(s) at one or more query paths as typed PowerShell objects. |
+| `Get-JsonWebTokenClaim -Path <string> -Name <string[]>` | Same, reading the token from a file. |
 | `Test-JsonWebTokenSignature -Token <string> -KeyFile <string>` | Verify using a key file (HMAC raw or PEM public). |
 | `Test-JsonWebTokenSignature -Token <string> -Secret <SecureString>` | Verify HMAC using a SecureString secret. |
 | `Test-JsonWebTokenSignature -Token <string> -PublicKey <RSA\|ECDsa>` | Verify using an already-loaded asymmetric public key. |

@@ -260,6 +260,102 @@ Test-Case -Name 'Stdin input: token piped through Get-Content -Raw' `
     -MustContain 'HS256'
 
 # ---------------------------------------------------------------------------
+# Query feature: happy path, multi-path, --raw, security guards
+# ---------------------------------------------------------------------------
+
+Test-Case -Name 'Query: --query payload.sub returns JSON-quoted value' `
+    -Arguments @('--file', (Sample 'hs256-token.jwt'), '--query', 'payload.sub') `
+    -ExpectedExit 0 `
+    -MustContain '"1234567890"'
+
+Test-Case -Name 'Query: --query sub shorthand resolves to payload.sub' `
+    -Arguments @('--file', (Sample 'hs256-token.jwt'), '--query', 'sub') `
+    -ExpectedExit 0 `
+    -MustContain '"1234567890"'
+
+Test-Case -Name 'Query: --query payload.sub --raw unwraps the value' `
+    -Arguments @('--file', (Sample 'hs256-token.jwt'), '--query', 'payload.sub', '--raw') `
+    -ExpectedExit 0 `
+    -MustContain '1234567890' `
+    -MustNotContain '"1234567890"'
+
+Test-Case -Name 'Query: multi-path comma-separated emits one value per line' `
+    -Arguments @('--file', (Sample 'hs256-token.jwt'), '--query', 'payload.sub,header.alg', '--raw') `
+    -ExpectedExit 0 `
+    -MustContain '1234567890', 'HS256'
+
+Test-Case -Name 'Query: missing path returns exit 2 with descriptive stderr' `
+    -Arguments @('--file', (Sample 'hs256-token.jwt'), '--query', 'payload.does_not_exist') `
+    -ExpectedExit 2 `
+    -MustContain 'not found'
+
+# Security gate: --query mutually exclusive with --detailed (parser-level error).
+Test-Case -Name 'Query: --query + --detailed combination refused (exit 2)' `
+    -Arguments @('--file', (Sample 'hs256-token.jwt'), '--query', 'sub', '--detailed') `
+    -ExpectedExit 2 `
+    -MustContain 'cannot be combined'
+
+# Security gate: --raw without --query refused (parser-level error).
+Test-Case -Name 'Query: --raw without --query refused (exit 2)' `
+    -Arguments @('--file', (Sample 'hs256-token.jwt'), '--raw') `
+    -ExpectedExit 2 `
+    -MustContain '--raw is only meaningful with --query'
+
+# Security: default --query output of a token with a deliberately-malicious ESC byte in a
+# claim value MUST NOT leak the raw 0x1B byte to stdout/stderr. JSON encoding via
+# Utf8JsonWriter must escape it.
+Test-Case -Name 'Query (default): ESC byte in adversarial claim MUST stay JSON-escaped' `
+    -Arguments @('--file', (Sample 'terminal-injection.jwt'),
+                 '--verify', '--key-file', (Sample 'hs256-secret.txt'),
+                 '--query', 'payload') `
+    -ExpectedExit 0 `
+    -MustNotContainBytes @([byte]0x1B)
+
+# Security: --raw against a string claim containing a C0 / DEL / C1 control character
+# must refuse with exit 2 and emit nothing on stdout (only a stderr diagnostic). This
+# is the primary regression guard for terminal-injection via the --raw escape hatch.
+# The 'sub' claim in terminal-injection.jwt contains literal ESC bytes (0x1B).
+Test-Case -Name 'Query (--raw): refuses control-character string value (exit 2, no ESC on stdout)' `
+    -Arguments @('--file', (Sample 'terminal-injection.jwt'),
+                 '--verify', '--key-file', (Sample 'hs256-secret.txt'),
+                 '--query', 'sub', '--raw') `
+    -ExpectedExit 2 `
+    -MustContain 'control character', 'terminal-control injection' `
+    -MustNotContainBytes @([byte]0x1B)
+
+# Security: --query + --verify with the WRONG key must emit ZERO query value on stdout.
+# A consumer pipeline that ignores the exit code must not be able to consume claims from
+# an unverified token. Only a stderr diagnostic is allowed, plus exit 3.
+Test-Case -Name 'Query (--verify failed): no claim leaks to stdout, exit 3' `
+    -Arguments @('--file', (Sample 'hs256-token.jwt'),
+                 '--verify', '--key-file', (Sample 'hs256-wrong.txt'),
+                 '--query', 'payload.sub') `
+    -ExpectedExit 3 `
+    -MustContain 'refusing to emit query output' `
+    -MustNotContain '1234567890'
+
+# Security: --query + --verify against an alg=none token must also suppress query output
+# even though the parser accepts the token. This blocks the "pipe a sub claim from an
+# unsigned token into a sensitive sink" pattern.
+Test-Case -Name 'Query (--verify on alg=none): no claim leaks to stdout, exit 3' `
+    -Arguments @('--file', (Sample 'alg-none.jwt'),
+                 '--verify', '--key-file', (Sample 'hs256-secret.txt'),
+                 '--query', 'sub') `
+    -ExpectedExit 3 `
+    -MustContain 'refusing to emit query output' `
+    -MustNotContain 'no-sig'
+
+# Atomic-commit invariant for multi-path queries: if any later path is missing, NO earlier
+# value may be emitted on stdout. This protects scripts that ignore exit code from
+# consuming partial data.
+Test-Case -Name 'Query (multi-path): missing later path suppresses earlier values' `
+    -Arguments @('--file', (Sample 'hs256-token.jwt'),
+                 '--query', 'payload.sub,payload.does_not_exist') `
+    -ExpectedExit 2 `
+    -MustContain 'not found' `
+    -MustNotContain '1234567890'
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 

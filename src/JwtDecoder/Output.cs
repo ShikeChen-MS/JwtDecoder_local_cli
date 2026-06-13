@@ -41,6 +41,94 @@ internal static class Output
         }
     }
 
+    /// <summary>
+    /// Writes the value(s) at the given comma-separated query <paramref name="paths"/>, one per
+    /// line in the order requested. Returns the index of the first path that did not resolve, or
+    /// <c>-1</c> if every path matched.
+    /// </summary>
+    /// <param name="w">Destination writer (typically <see cref="Console.Out"/>).</param>
+    /// <param name="jwt">The decoded JWT to query.</param>
+    /// <param name="paths">Comma-separated query paths.</param>
+    /// <param name="raw">If <c>true</c>, string scalars are emitted unwrapped (subject to a
+    /// control-character safety check; see <see cref="FormatForCli"/>).</param>
+    /// <param name="firstFailingPath">On not-found return, the original text of the path that
+    /// did not resolve (so the caller can build a useful diagnostic without re-parsing).
+    /// On <c>-1</c> return, empty.</param>
+    /// <remarks>
+    /// Atomic behaviour: nothing is written to <paramref name="w"/> until every path has been
+    /// resolved AND every value has passed the <paramref name="raw"/>-mode safety check. On a
+    /// missing path the method returns the path's index with <paramref name="w"/> untouched.
+    /// On a control-character-bearing string value under <paramref name="raw"/>, the method
+    /// throws <see cref="InvalidDataException"/> with <paramref name="w"/> untouched. This
+    /// prevents a script that ignores the exit code from consuming partial output for a
+    /// missing path, or terminal-injection bytes for a deliberately-malicious string scalar.
+    /// </remarks>
+    public static int WriteQueryResults(TextWriter w, Jwt jwt, string paths, bool raw, out string firstFailingPath)
+    {
+        var parsed = JwtQueryPath.ParseMany(paths);
+        var formatted = new List<string>(parsed.Count);
+        for (int i = 0; i < parsed.Count; i++)
+        {
+            if (!JwtQuery.TryQuery(jwt, parsed[i], out var el))
+            {
+                firstFailingPath = parsed[i].Original;
+                return i;
+            }
+            formatted.Add(FormatForCli(parsed[i], el, raw));
+        }
+        foreach (var s in formatted)
+            w.WriteLine(s);
+        firstFailingPath = string.Empty;
+        return -1;
+    }
+
+    /// <summary>
+    /// Format a queried <see cref="JsonElement"/> for CLI output. In <paramref name="raw"/>
+    /// mode, string scalars are returned unwrapped (without JSON quotes) — but only after a
+    /// scan refuses any value containing ASCII C0/DEL/C1 control characters. The default
+    /// (non-raw) path uses <see cref="JwtQuery.FormatJson(JsonElement)"/>, which always emits
+    /// terminal-safe JSON with control characters escaped as <c>\\uXXXX</c>.
+    /// </summary>
+    /// <exception cref="InvalidDataException">In <paramref name="raw"/> mode, when the string
+    /// value at <paramref name="path"/> contains a C0/DEL/C1 control character that would
+    /// reach the terminal verbatim if printed.</exception>
+    private static string FormatForCli(JwtQueryPath path, JsonElement el, bool raw)
+    {
+        if (!raw)
+            return JwtQuery.FormatJson(el);
+
+        if (el.ValueKind == JsonValueKind.String)
+        {
+            string s = el.GetString() ?? string.Empty;
+            int badAt = IndexOfControlChar(s);
+            if (badAt >= 0)
+            {
+                int code = s[badAt];
+                throw new InvalidDataException(
+                    $"Query value at '{path.Original}' contains an ASCII / C1 control character " +
+                    $"(\\u{code:X4} at position {badAt}) and cannot be emitted in --raw mode without " +
+                    "risk of terminal-control injection. Remove --raw to emit the JSON-escaped form.");
+            }
+            return s;
+        }
+
+        // Numbers, booleans, null, objects, arrays: FormatRaw already routes these through
+        // FormatJson, which is terminal-safe via Utf8JsonWriter's default escaping policy.
+        return JwtQuery.FormatRaw(el);
+    }
+
+    private static int IndexOfControlChar(string s)
+    {
+        for (int i = 0; i < s.Length; i++)
+        {
+            char c = s[i];
+            // C0 controls (0x00..0x1F), DEL (0x7F), and C1 controls (0x80..0x9F).
+            if (c < 0x20 || c == 0x7F || (c >= 0x80 && c <= 0x9F))
+                return i;
+        }
+        return -1;
+    }
+
     private static void WriteHeaderSection(TextWriter w, Jwt jwt)
     {
         w.WriteLine("== HEADER ==");

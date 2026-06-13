@@ -70,7 +70,42 @@ var ecResult = JwtTools.VerifyEcdsa(token, ec);
 
 // File-based — same rules as the CLI (alg inferred + cross-checked against file)
 var fileResult = JwtTools.VerifyWithKeyFile(token, "./hs256-secret.txt");
+
+// Query a single claim by path (returns a cloned JsonElement, safe to use after the call)
+JsonElement? sub = JwtTools.Query(token, "payload.sub");
+Console.WriteLine(sub?.GetString());                       // "1234567890"
+
+// Or use the Try-pattern
+if (JwtTools.TryQuery(token, "payload.roles[0]", out var role))
+    Console.WriteLine(role.GetString());
+
+// When you already have a decoded Jwt, the instance methods avoid re-parsing
+using var jwt2 = JwtTools.Decode(token);
+if (jwt2.TryQuery("header.alg", out var algEl))
+{
+    Console.WriteLine(algEl.GetString());
+
+    // Format helpers — JSON-canonical (safe for terminals) or raw (string scalars unwrapped)
+    string asJson = JwtQuery.FormatJson(algEl);                // "HS256"
+    string asRaw  = JwtQuery.FormatRaw(algEl);                 //  HS256
+}
 ```
+
+### Query path grammar
+
+Paths use dot notation with `[N]` for array indices. The first segment may be `header` or `payload` to switch scope; otherwise the scope defaults to `payload` (shorthand). Quoted segments (`payload."x5t#S256"`) escape names that contain non-identifier characters.
+
+| Path                       | Meaning                                                |
+| -------------------------- | ------------------------------------------------------ |
+| `payload.sub`              | The `sub` claim in the payload.                        |
+| `header.alg`               | The `alg` parameter in the JOSE header.                |
+| `sub`                      | Shorthand for `payload.sub`.                           |
+| `payload.roles[0]`         | First element of the `roles` array.                    |
+| `payload.address.city`     | Nested property walk.                                  |
+| `payload."x5t#S256"`       | Quoted segment for keys with non-identifier characters. |
+| `payload`                  | The whole payload object.                              |
+
+`JwtQueryPath.Parse` parses a single path; `JwtQueryPath.ParseMany` parses a comma-separated list (commas inside quoted segments or `[...]` are not treated as separators). A path that does not resolve returns `false` from `TryQuery` / `null` from `Query`; a JSON `null` value at the target is a successful match.
 
 If you need more control (e.g. reusing an `RSA` across many verifications, owning the `KeyMaterial` lifetime, or accessing the raw signing input), drop down to the underlying `Jwt`, `JwtVerifier`, `KeyMaterial`, and `KeyLoader` types directly — `JwtTools` is just a thin convenience layer over them.
 

@@ -26,4 +26,8 @@
     <ProjectReference Include="..\JwtDecoder.Core\JwtDecoder.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="JwtDecoder.Tests" />
+  </ItemGroup>
+
 </Project>
