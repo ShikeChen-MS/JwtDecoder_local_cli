@@ -98,12 +98,18 @@ jobs:
 
           # Targeted regex rewrite of the ModuleVersion line. Safer than
           # Update-ModuleManifest, which can reformat unrelated fields.
+          # Detect "did the pattern match?" separately from "did the
+          # content change?", because publishing a version that happens
+          # to match the committed manifest value (e.g. tagging v1.0.0
+          # while ModuleVersion is already '1.0.0') produces byte-
+          # identical output and would otherwise look like a no-op.
           $manifestPath = Join-Path $moduleDir 'JwtDecoder.psd1'
-          $content = Get-Content -Raw -LiteralPath $manifestPath
-          $updated = $content -replace "(?m)^(\s*ModuleVersion\s*=\s*)'[^']+'", "`${1}'$version'"
-          if ($updated -eq $content) {
-            throw "Failed to update ModuleVersion in $manifestPath (regex matched nothing)."
+          $content      = Get-Content -Raw -LiteralPath $manifestPath
+          $pattern      = "(?m)^(\s*ModuleVersion\s*=\s*)'[^']+'"
+          if (-not [regex]::IsMatch($content, $pattern)) {
+            throw "Could not find a ModuleVersion = '...' line to rewrite in $manifestPath."
           }
+          $updated = [regex]::Replace($content, $pattern, "`${1}'$version'")
           Set-Content -LiteralPath $manifestPath -Value $updated -NoNewline
 
           # Independently re-validate that the manifest now reports the tag version.
