@@ -147,6 +147,48 @@ jobs:
         shell: pwsh
         run: ./tools/Test-AotBuild.ps1 -BinPath "${{ steps.locate.outputs.binPath }}"
 
+      # --------------------------------------------------------------
+      # Offline-guarantee verification (Phase 6).
+      # Asserts that JwtDecoder.Core.dll, the pre-AOT jwtdecode.dll, and
+      # the published native jwtdecode binary have no networking
+      # references. Four independent layers (managed IL grep via
+      # ilspycmd, native imports via dumpbin/objdump/otool, raw-bytes
+      # string scan, transitive NuGet package check) plus a SHA-256
+      # equality check between the file we inspect and the file we
+      # upload. All disassembly + imports listings are uploaded as a
+      # transparency artifact for downstream auditors.
+      # --------------------------------------------------------------
+      - name: Install ilspycmd
+        shell: pwsh
+        run: dotnet tool install -g ilspycmd
+
+      - name: Verify offline guarantee (jwtdecode)
+        shell: pwsh
+        run: |
+          # Ensure the global tool dir is on PATH for this step.
+          $tools = if ($IsWindows) { Join-Path $env:USERPROFILE '.dotnet\tools' } else { Join-Path $env:HOME '.dotnet/tools' }
+          $env:PATH = "$tools$([System.IO.Path]::PathSeparator)$env:PATH"
+          # The pre-AOT managed dll lives at .../net10.0/<rid>/jwtdecode.dll.
+          $managedCli = "src/JwtDecoder/bin/$env:CONFIGURATION/net10.0/${{ matrix.rid }}/jwtdecode.dll"
+          if (-not (Test-Path $managedCli)) {
+            Write-Error "pre-AOT managed assembly not found at $managedCli"
+            exit 1
+          }
+          ./tools/Verify-OfflineGuarantee.ps1 `
+            -CoreDllPath        "src/JwtDecoder.Core/bin/$env:CONFIGURATION/net8.0/JwtDecoder.Core.dll" `
+            -ManagedCliDllPath  $managedCli `
+            -AotExePath         "${{ steps.locate.outputs.binPath }}" `
+            -DisasmOutDir       "ci-artifacts/disasm-${{ matrix.rid }}" `
+            -UploadHashPath     "${{ steps.locate.outputs.binPath }}"
+
+      - name: Upload offline-guarantee transparency artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-guarantee-${{ matrix.rid }}-${{ env.CONFIGURATION }}-${{ github.sha }}
+          path: ci-artifacts/disasm-${{ matrix.rid }}
+          if-no-files-found: error
+          retention-days: 30
+
       # Mint a Sigstore-backed build provenance attestation for the binary
       # we just tested. Anyone who downloads the artifact can later run
       # `gh attestation verify <file> --owner ShikeChen-MS` to confirm it

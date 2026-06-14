@@ -18,6 +18,7 @@
 project.lock.json
 project.fragment.lock.json
 artifacts/
+ci-artifacts/
 
 ## OS
 .DS_Store
