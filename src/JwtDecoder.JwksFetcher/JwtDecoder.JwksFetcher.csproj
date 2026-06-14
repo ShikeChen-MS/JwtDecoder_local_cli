@@ -47,6 +47,9 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="JwtDecoder.JwksFetcher.Tests" />
+    <!-- The jwksfetch CLI needs to propagate the internal AllowLoopbackForTesting
+         flag from its own TestHooks into FetcherOptions for E2E tests. -->
+    <InternalsVisibleTo Include="JwksFetch" />
   </ItemGroup>
 
   <ItemGroup>

@@ -17,6 +17,17 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Compile-linked from the JwksFetcher tests so the same Kestrel HTTPS
+         fixture is used by both projects (one source of truth). -->
+    <Compile Include="..\JwtDecoder.JwksFetcher.Tests\HttpsTestServer.cs" Link="Shared\HttpsTestServer.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Local HTTPS test server (Kestrel) for jwksfetch end-to-end tests. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\src\JwksFetch\JwksFetch.csproj" />
   </ItemGroup>
 

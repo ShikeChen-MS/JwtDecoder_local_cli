@@ -209,6 +209,7 @@ internal static class Program
             m.Contains("SSRF", StringComparison.OrdinalIgnoreCase) ||
             m.Contains("redirect", StringComparison.OrdinalIgnoreCase) ||
             m.Contains("maximum size", StringComparison.OrdinalIgnoreCase) ||
+            m.Contains("exceeds maximum", StringComparison.OrdinalIgnoreCase) ||
             m.Contains("non-HTTPS", StringComparison.OrdinalIgnoreCase) ||
             m.Contains("Content-Encoding", StringComparison.OrdinalIgnoreCase) ||
             m.Contains("Refusing URL", StringComparison.OrdinalIgnoreCase);
@@ -343,6 +344,7 @@ internal static class Program
             ProxyDefaultCredentials = opts.ProxyDefaultCredentials,
             AllowPrivateProxy = opts.AllowPrivateProxy,
             SendBearerToDiscovery = opts.BearerTokenDiscovery,
+            AllowLoopbackForTesting = TestHooks.AllowLoopbackForTesting,
         };
     }
 
