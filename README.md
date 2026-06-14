@@ -216,12 +216,83 @@ samples\
     generate-attack-samples.ps1    # algorithm-confusion / wrong-curve / oversized / etc.
 ```
 
+## JWKS workflow (network‑capable companion)
+
+`jwtdecode` and the `JwtDecoder` PowerShell module are 100% offline. But cloud‑issued JWTs often have a public key you don't already have on disk — it lives at a JWKS endpoint, often discoverable via OIDC. To bridge that gap **without compromising the offline guarantee of the trusted binaries**, there's a separate companion:
+
+| Component                                                       | Network capable? | How it ships |
+|-----------------------------------------------------------------|---|---|
+| `jwtdecode.exe` / `JwtDecoder` PowerShell module                | **No** (zero sockets — verified in CI) | as today |
+| `jwksfetch.exe` / `JwtDecoder.Jwks` PowerShell module / `JwtDecoder.JwksFetcher` NuGet | **Yes** (HTTPS only, hardened) | **separate** binary / module / package |
+
+The companion fetches one JWKS over HTTPS (or runs OIDC discovery), validates it strictly, picks the JWK matching the JWT's `kid`/`alg`/curve, and emits **one PEM block**. The trusted binary takes that PEM via stdin and verifies as usual.
+
+### CLI pipeline
+
+```powershell
+# Direct JWKS URL
+jwksfetch --jwks-url https://login.example.com/.well-known/jwks.json --token-file token.jwt |
+  jwtdecode --file token.jwt --verify --key-file -
+
+# Or via OIDC discovery (appends /.well-known/openid-configuration to the issuer)
+jwksfetch --from-issuer https://login.example.com --token-file token.jwt |
+  jwtdecode --file token.jwt --verify --key-file -
+
+# File-based two-step (no TOCTOU on token.jwt between the two reads)
+jwksfetch --jwks-url https://login.example.com/keys --token-file token.jwt > key.pem
+jwtdecode --file token.jwt --verify --key-file key.pem
+```
+
+The pipe carries only a PEM public key. `jwtdecode.exe` opens no sockets and its binary contains no networking imports (verified at every CI run, see Security notes below).
+
+### PowerShell pipeline
+
+```powershell
+Import-Module JwtDecoder       # offline (unchanged)
+Import-Module JwtDecoder.Jwks  # network-capable (explicit opt-in)
+
+# Explicit (deterministic Dispose)
+$jwk = Get-JsonWebKey -Token $token -Issuer https://login.example.com
+try {
+    Test-JsonWebTokenSignature -Token $token -PublicKey $jwk.PublicKey
+} finally { $jwk.Dispose() }
+
+# Pipeline one-liner
+Get-JsonWebKey -Token $token -JwksUri https://login.example.com/keys |
+    Test-JsonWebTokenSignature -Token $token
+```
+
+### `jwksfetch` hardening (one set of guards per HTTPS hop)
+
+- HTTPS only — no `--insecure` flag, ever. TLS 1.2 / 1.3 only; HTTP/3 not negotiated.
+- SSRF deny‑list applied to every hop — IP literals AND DNS‑resolved addresses (IPv4‑mapped IPv6 unmapped first). Refused: loopback, link‑local (incl. `169.254.169.254` cloud metadata), 10/8, 172.16/12, 192.168/16, 0/8, 100.64/10; `::1`, `fc00::/7`, `fe80::/10`, `fec0::/10`, multicast; the literal hostname `localhost`.
+- DNS rebinding defended via `SocketsHttpHandler.ConnectCallback` — we resolve, validate, then connect by `IPEndPoint` so the IP that survives validation is the IP TLS handshakes with. Skipped transparently when a proxy is in use (the proxy joins the trust chain).
+- `UseProxy = false` by default. Ambient `HTTPS_PROXY` is ignored unless you pass `--use-system-proxy` or `--proxy <url>`.
+- Bearer token is `byte[]`‑based and **stripped on every redirect**, even same‑host. For OIDC discovery the bearer is NOT sent on the discovery hop unless `--bearer-token-discovery` is given (opt‑in).
+- Manual redirect loop with a cap (default 3, max 5); each hop is re‑validated against SSRF. Non‑HTTPS targets and same‑URL revisits refused.
+- `AutomaticDecompression = None`; responses with `Content-Encoding` are refused.
+- JWKS strictness: recursive duplicate‑key JSON rejection, `kty=oct` refused, any private component refused, `x5u`/`jku` refused, `x5c` ignored, `use=enc` refused, `key_ops` must contain `verify` if present, RSA modulus ≥ 2048 bits with odd exponent ≥ 3, EC `crv`/coordinate length bound by the JOSE binding.
+- OIDC: issuer field MUST match the requested URL after canonicalization (lowercase host, default port stripped, single trailing slash stripped); same strict JSON path for both the metadata and the JWKS document.
+- No on‑disk cache.
+- Custom `--header-file` rejects dangerous header names (`Host`, `Authorization`, `Proxy-Authorization`, `Cookie`, `Connection`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`, `Expect`, `Content-Length`) and CR/LF/NUL in values.
+
+### Trust boundary — read this twice
+
+**The offline guarantee belongs to `jwtdecode.exe` alone, not to the pipeline.** When you pipe `jwksfetch | jwtdecode`, you've added a network‑capable process to your trust chain. The `jwksfetch` binary applies a defensible set of guards (above) — but it IS opening sockets. If your threat model strictly forbids any network activity in your verification path, **don't use the companion**; obtain the public key out of band and feed it to `jwtdecode --key-file <path>` directly. The same advice applies in PowerShell: the `JwtDecoder` module stays offline; importing `JwtDecoder.Jwks` loads `System.Net.Http` into the process for the session.
+
+### See also
+
+- `jwksfetch --help` for the full CLI surface.
+- [`JwtDecoder.JwksFetcher` on nuget.org](https://www.nuget.org/packages/JwtDecoder.JwksFetcher) for embedding the JWKS pipeline in your own .NET app. Lock‑step exact‑pinned to `JwtDecoder.Core`.
+- `src/JwtDecoder.JwksFetcher/README.md` (shipped with the nupkg) for the library‑level docs.
+- `src/JwtDecoder.Jwks.PowerShell/README.md` for the cmdlet's deep dive.
+
 ## Security notes
 
 This tool is built for a no-compromise threat model: offline-only, security-first, drop-the-feature-if-it-weakens-anything.
 
 **Network isolation**
-- The process opens no sockets and resolves no hosts. Only filesystem reads (token / key file), stdin, stdout and stderr are used.
+- The `jwtdecode` process opens no sockets and resolves no hosts. Only filesystem reads (token / key file), stdin, stdout and stderr are used. Verified at every CI run by `tools/Verify-OfflineGuarantee.ps1` (managed IL grep + native binary import inspection + transitive package check + scan‑vs‑upload SHA‑256 equality). The IL disassembly + import listings are attached to every release as a transparency artifact.
 
 **Algorithm-confusion guard (CVE-pattern: JWT alg=HS256 + RSA public key as MAC secret)**
 - If the JWT's `alg` is `HS*` and the supplied key file *looks like PEM*, the tool refuses to verify and exits with code `2`. This blocks the well-known class of attacks where an attacker repurposes a published RSA/EC public key as an HMAC shared secret.

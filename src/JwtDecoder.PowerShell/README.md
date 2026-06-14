@@ -67,7 +67,7 @@ Returned values are typed: strings stay strings, numbers become `long` or `doubl
 
 ## Security
 
-- **No network access.** Pure local processing.
+- **No network access.** Pure local processing. The module's only managed dependency is `JwtDecoder.Core`, which has no `System.Net.*` references. (If you also import the separate [`JwtDecoder.Jwks`](../JwtDecoder.Jwks.PowerShell/README.md) companion module into the same session, that module brings in `System.Net.Http` for JWKS acquisition; this offline module's assembly references remain unchanged.)
 - **Algorithm-confusion guard.** `-Secret` and `-KeyFile` refuse PEM-shaped inputs when the JWT alg is HS\*.
 - **Private-key PEMs are refused.** Verification only requires the public key.
 - **ECDSA curve binding enforced.** `ES256↔P-256`, `ES384↔P-384`, `ES512↔P-521`. Mismatch is refused.
