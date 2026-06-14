@@ -70,6 +70,21 @@ internal sealed class HttpsTestServer : IAsyncDisposable
             var ekus = new OidCollection { new Oid("1.3.6.1.5.5.7.3.3") };
             req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(ekus, critical: false));
         }
+        else
+        {
+            // EKU = Server Authentication. Real-world server certs ALWAYS
+            // declare EKU explicitly (RFC 5280 §4.2.1.12; CAB/Forum baseline
+            // requirements §7.1.2.7.6). Without this, Linux/OpenSSL's
+            // X509Chain refuses the cert when the production code's
+            // ChainPolicy.ApplicationPolicy specifies ServerAuth (the F1
+            // fix in JwksClient.cs) — even though Windows/CryptoAPI treats
+            // an absent EKU as "any purpose". Tests previously passed only
+            // on Windows runners; CI Linux runners failed with "The SSL
+            // connection could not be established" because the chain build
+            // returned false for the policy-mismatch.
+            var ekus = new OidCollection { new Oid("1.3.6.1.5.5.7.3.1") };
+            req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(ekus, critical: false));
+        }
         var now = DateTimeOffset.UtcNow;
         using var selfSigned = req.CreateSelfSigned(now.AddMinutes(-5), now.AddHours(1));
 
