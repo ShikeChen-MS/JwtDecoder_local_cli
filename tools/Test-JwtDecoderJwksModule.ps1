@@ -99,7 +99,7 @@ try {
 # ---- kid mismatch ----
 
 Write-Host "`n[3] kid mismatch throws (refused)"
-$badKidToken = Join-Path $env:TEMP ("badkid-" + [guid]::NewGuid().ToString('N') + ".jwt")
+$badKidToken = Join-Path ([System.IO.Path]::GetTempPath()) ("badkid-" + [guid]::NewGuid().ToString('N') + ".jwt")
 function To-B64Url([byte[]]$bytes) {
     $b = [Convert]::ToBase64String($bytes).TrimEnd('=')
     return $b.Replace('+','-').Replace('/','_')

@@ -159,7 +159,7 @@ function B64UrlAscii([string]$s) {
 $hdr  = B64UrlAscii '{"alg":"RS256","kid":"WRONG-kid"}'
 $pld  = B64UrlAscii '{"sub":"x"}'
 $junk = B64UrlAscii ([byte[]]@(1,2,3,4))
-$badTokPath = Join-Path $env:TEMP ("badkid-" + [guid]::NewGuid().ToString('N') + ".jwt")
+$badTokPath = Join-Path ([System.IO.Path]::GetTempPath()) ("badkid-" + [guid]::NewGuid().ToString('N') + ".jwt")
 Set-Content -Path $badTokPath -Value "$hdr.$pld.$junk" -Encoding ASCII -NoNewline
 try {
     $r = Invoke-JwksFetch @('--jwks-file', $jwks, '--token-file', $badTokPath)
