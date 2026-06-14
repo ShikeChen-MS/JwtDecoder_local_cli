@@ -10,7 +10,7 @@ namespace JwtDecoder.JwksFetcher;
 /// <remarks>
 /// Only public-key material is emitted. The RSA path uses
 /// <see cref="RSA.ImportParameters(RSAParameters)"/> +
-/// <see cref="RSA.ExportSubjectPublicKeyInfoPem"/>; the EC path uses the
+/// <c>RSA.ExportSubjectPublicKeyInfoPem()</c>; the EC path uses the
 /// equivalent <see cref="ECDsa"/> APIs with the JOSE curve binding enforced
 /// by <see cref="JwksDocument"/> upstream.
 /// </remarks>
