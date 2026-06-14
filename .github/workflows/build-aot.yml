@@ -160,7 +160,9 @@ jobs:
       # --------------------------------------------------------------
       - name: Install ilspycmd
         shell: pwsh
-        run: dotnet tool install -g ilspycmd
+        # Pin version for supply-chain hygiene; bump when validating a newer
+        # 10.x release of ICSharpCode/ILSpy.
+        run: dotnet tool install -g ilspycmd --version 10.1.0.8386
 
       - name: Verify offline guarantee (jwtdecode)
         shell: pwsh

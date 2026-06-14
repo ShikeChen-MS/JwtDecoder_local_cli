@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -21,6 +21,18 @@
     <Version>1.0.0</Version>
     <AssemblyTitle>jwksfetch</AssemblyTitle>
     <Description>Acquire a single public verification key for a JWT from a JWKS endpoint (or via OIDC discovery), and emit it as PEM on stdout. Companion to jwtdecode.</Description>
+
+    <!-- Test-hook gating (final-review I6).
+         The CLI carries a TestHooks.AllowLoopbackForTesting static that lets
+         end-to-end tests run a Kestrel HTTPS server on 127.0.0.1 through the
+         full CLI path. This is unsafe to ship: anything in the production
+         binary that can be set internally is reachable via reflection.
+         Solution: conditional-compile the hook. The constant
+         JWKSFETCH_TEST_HOOKS is set ONLY when JwksFetch.Tests triggers the
+         build (via AdditionalProperties on its ProjectReference). A clean
+         `dotnet publish src/JwksFetch` does NOT set the property, so the
+         hook compiles to zero IL in the shipped binary. -->
+    <DefineConstants Condition="'$(JwksFetchAllowTestHooks)' == 'true'">$(DefineConstants);JWKSFETCH_TEST_HOOKS</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>

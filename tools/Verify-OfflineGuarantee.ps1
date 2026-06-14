@@ -107,8 +107,12 @@ function Warn([string]$Msg) {
 Write-Host "`n[A] Managed IL inspection (ilspycmd)" -ForegroundColor Cyan
 
 if (-not (Get-Command ilspycmd -ErrorAction SilentlyContinue)) {
-    Write-Host "  installing ilspycmd ..." -ForegroundColor DarkGray
-    & dotnet tool install -g ilspycmd 2>&1 | Out-Null
+    # Pin the tool version. Supply-chain hygiene: a compromised newer
+    # release of ilspycmd could silently degrade the offline-guarantee
+    # verifier by emitting IL that doesn't match our forbidden patterns.
+    # Bump deliberately when validating a newer 10.x release.
+    Write-Host "  installing ilspycmd (pinned) ..." -ForegroundColor DarkGray
+    & dotnet tool install -g ilspycmd --version 10.1.0.8386 2>&1 | Out-Null
     $toolsDir = if ($IsWindows) {
         Join-Path $env:USERPROFILE '.dotnet\tools'
     } else {

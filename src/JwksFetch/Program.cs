@@ -348,7 +348,14 @@ internal static class Program
             ProxyDefaultCredentials = opts.ProxyDefaultCredentials,
             AllowPrivateProxy = opts.AllowPrivateProxy,
             SendBearerToDiscovery = opts.BearerTokenDiscovery,
+#if JWKSFETCH_TEST_HOOKS
             AllowLoopbackForTesting = TestHooks.AllowLoopbackForTesting,
+#else
+            // No test hook in the production build — SSRF policy always
+            // refuses loopback. The symbol JWKSFETCH_TEST_HOOKS is defined
+            // by JwksFetch.Tests.csproj only (final-review I6).
+            AllowLoopbackForTesting = false,
+#endif
         };
     }
 

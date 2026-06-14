@@ -9,14 +9,27 @@ namespace JwtDecoder.Jwks.PowerShell;
 /// <remarks>
 /// The wrapped <see cref="AsymmetricAlgorithm"/> is owned by this object when
 /// constructed via <see cref="CreateOwned"/>; <see cref="Dispose"/> releases
-/// the native key handle. A finalizer is the safety net for the pipeline form
-/// where users don't explicitly dispose. Prefer the explicit pattern in
-/// long-running scripts:
+/// the native key handle.
+/// <para>
+/// <b>Lifetime contract (final-review I7):</b> there is intentionally NO
+/// finalizer. A finalizer could dispose the wrapped RSA/ECDsa while a
+/// downstream consumer (e.g., <c>Test-JsonWebTokenSignature -PublicKey</c>
+/// reading <c>.PublicKey</c> from a piped <see cref="JsonWebKey"/>) is still
+/// using it, producing nondeterministic verification failures. The trade-off
+/// is that callers MUST dispose explicitly — preferred patterns:
+/// </para>
 /// <code>
 /// $jwk = Get-JsonWebKey -JwksFile ./keys.json -Token $t
 /// try { Test-JsonWebTokenSignature -Token $t -PublicKey $jwk.PublicKey }
 /// finally { $jwk.Dispose() }
 /// </code>
+/// <para>
+/// The pipeline one-liner form
+/// (<c>Get-JsonWebKey ... | Test-JsonWebTokenSignature -Token $t</c>) keeps
+/// the wrapper alive until the pipeline completes, then leaks the
+/// <c>RSA</c>/<c>ECDsa</c> handle until process exit / next GC. The
+/// handle is small; for short-lived scripts this is acceptable.
+/// </para>
 /// </remarks>
 public sealed class JsonWebKey : IDisposable
 {
@@ -80,14 +93,7 @@ public sealed class JsonWebKey : IDisposable
         _disposed = true;
         if (_ownsPublicKey) _publicKey?.Dispose();
         _publicKey = null;
-        GC.SuppressFinalize(this);
     }
 
-    ~JsonWebKey()
-    {
-        // Safety net for the pipeline form (Get-JsonWebKey | Test-JsonWebTokenSignature):
-        // the wrapper goes out of scope without a try/finally; GC eventually
-        // releases the RSA/ECDsa handle through us.
-        if (!_disposed && _ownsPublicKey) _publicKey?.Dispose();
-    }
+    // NO finalizer (final-review I7). See class-level remarks for lifetime contract.
 }

@@ -28,7 +28,13 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\JwksFetch\JwksFetch.csproj" />
+    <!-- AdditionalProperties propagates the test-hook flag DOWN to the JwksFetch
+         project build that this reference triggers. Without it, MSBuild project
+         references do not pass through properties. The CLI assembly built by
+         `dotnet publish src/JwksFetch` from scratch does NOT see this property
+         and therefore compiles TestHooks.cs to nothing. (Final-review I6.) -->
+    <ProjectReference Include="..\..\src\JwksFetch\JwksFetch.csproj"
+                      AdditionalProperties="JwksFetchAllowTestHooks=true" />
   </ItemGroup>
 
 </Project>

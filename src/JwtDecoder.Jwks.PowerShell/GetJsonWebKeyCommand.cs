@@ -120,7 +120,7 @@ public sealed class GetJsonWebKeyCommand : PSCmdlet
                 case ParamSetJwksFile:
                     {
                         string resolved = GetUnresolvedProviderPathFromPSPath(JwksFile);
-                        jwksBytes = File.ReadAllBytes(resolved);
+                        jwksBytes = ReadFileBounded(resolved, JwksDocument.MaxJwksBytes, "JWKS file");
                         sourceUri = null;
                         break;
                     }
@@ -223,7 +223,23 @@ public sealed class GetJsonWebKeyCommand : PSCmdlet
             return Encoding.UTF8.GetBytes(Token);
 
         string resolved = GetUnresolvedProviderPathFromPSPath(Path!);
-        return File.ReadAllBytes(resolved);
+        return ReadFileBounded(resolved, Jwt.MaxTokenChars, "token file");
+    }
+
+    /// <summary>
+    /// Read a file into a byte[] but refuse anything over <paramref name="maxBytes"/>.
+    /// Matches the CLI's bounded-read semantics so a giant local file can't cause
+    /// a managed OOM before the parser's own size caps trigger (final-review I8).
+    /// </summary>
+    private static byte[] ReadFileBounded(string path, int maxBytes, string sourceName)
+    {
+        var info = new FileInfo(path);
+        if (!info.Exists)
+            throw new FileNotFoundException($"{sourceName} not found: {path}", path);
+        if (info.Length > maxBytes)
+            throw new InvalidDataException(
+                $"{sourceName} '{path}' is {info.Length:N0} bytes; maximum {maxBytes:N0}.");
+        return File.ReadAllBytes(path);
     }
 
     private FetcherOptions BuildFetcherOptions()
