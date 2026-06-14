@@ -7,8 +7,10 @@ name: Publish release (PSGallery + NuGet + GitHub Release)
 #   2. Build + functional-test the PowerShell module.
 #   3. Build + functional-test the AOT CLI on all 5 supported platforms
 #      (Native AOT, with Sigstore build-provenance attestations).
-#   4. Publish the module to PowerShell Gallery (environment-gated;
-#      requires manual approval; dry-run by default).
+#   4. Publish the module to PowerShell Gallery — both modules:
+#      `JwtDecoder` (offline) and `JwtDecoder.Jwks` (network-capable
+#      companion). Environment-gated; requires manual approval; dry-run
+#      by default.
 #   5. Pack + publish JwtDecoder.Core AND JwtDecoder.JwksFetcher to
 #      nuget.org and GitHub Packages (environment-gated; dry-run by
 #      default). JwksFetcher carries an exact-pin dependency on Core,
@@ -43,6 +45,7 @@ permissions:
 env:
   PROJECT_CORE:        src/JwtDecoder.Core/JwtDecoder.Core.csproj
   PROJECT_MODULE:      src/JwtDecoder.PowerShell/JwtDecoder.PowerShell.csproj
+  PROJECT_JWKS_MODULE: src/JwtDecoder.Jwks.PowerShell/JwtDecoder.Jwks.PowerShell.csproj
   PROJECT_JWKSFETCHER: src/JwtDecoder.JwksFetcher/JwtDecoder.JwksFetcher.csproj
   PROJECT_CLI:         src/JwtDecoder/JwtDecoder.csproj
 
@@ -189,6 +192,100 @@ jobs:
         with:
           name: publish-stage
           path: ${{ runner.temp }}/publish-stage
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------
+  # Job 2b: build + functionally test the JwtDecoder.Jwks PowerShell
+  # module (the network-capable companion). Same gating, same staging
+  # pattern, separate artifact name so the offline module's stage isn't
+  # contaminated.
+  # ---------------------------------------------------------------------
+  validate-jwks-module:
+    name: Build + test JwtDecoder.Jwks PowerShell module
+    needs: prep
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Setup .NET SDKs (8 for PS module + Core, 10 for tests)
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Run unit tests (dotnet test)
+        shell: pwsh
+        run: dotnet test -c Release --logger "console;verbosity=normal"
+
+      - name: Restore
+        shell: pwsh
+        run: dotnet restore "$env:PROJECT_JWKS_MODULE"
+
+      - name: Publish module (dotnet)
+        shell: pwsh
+        run: dotnet publish "$env:PROJECT_JWKS_MODULE" -c Release --no-restore
+
+      - name: Stage module + rewrite ModuleVersion to the tag's version
+        shell: pwsh
+        run: |
+          $publishDir = "src/JwtDecoder.Jwks.PowerShell/bin/Release/net8.0/publish"
+          $version    = '${{ needs.prep.outputs.version }}'
+          $stageRoot  = Join-Path $env:RUNNER_TEMP 'publish-stage-jwks'
+          $moduleDir  = Join-Path $stageRoot 'JwtDecoder.Jwks'
+
+          if (Test-Path $stageRoot) { Remove-Item $stageRoot -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $moduleDir | Out-Null
+
+          Get-ChildItem -LiteralPath $publishDir -File |
+            Where-Object { $_.Extension -notin @('.pdb', '.xml') } |
+            ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $moduleDir $_.Name) -Force }
+
+          $manifestPath = Join-Path $moduleDir 'JwtDecoder.Jwks.psd1'
+          $content      = Get-Content -Raw -LiteralPath $manifestPath
+          $pattern      = "(?m)^(\s*ModuleVersion\s*=\s*)'[^']+'"
+          if ($content -notmatch $pattern) {
+            throw "ModuleVersion line not found in $manifestPath"
+          }
+          $updated = [regex]::Replace($content, $pattern, ('$1' + "'" + $version + "'"))
+          Set-Content -LiteralPath $manifestPath -Value $updated -NoNewline
+
+          $m = Test-ModuleManifest -Path $manifestPath
+          if ($m.Version -ne [Version]$version) {
+            throw "Manifest version $($m.Version) does not match tag version $version after rewrite."
+          }
+          Write-Host "Staged JwtDecoder.Jwks $version at: $moduleDir"
+          Get-ChildItem $moduleDir | Format-Table Name, Length
+
+      - name: Functional tests against the staged module
+        shell: pwsh
+        run: |
+          $manifestPath = Join-Path $env:RUNNER_TEMP 'publish-stage-jwks' 'JwtDecoder.Jwks' 'JwtDecoder.Jwks.psd1'
+          ./tools/Test-JwtDecoderJwksModule.ps1 -ModulePath $manifestPath
+
+      - name: Pre-check PSGallery — refuse to re-publish an existing version
+        shell: pwsh
+        run: |
+          $version = '${{ needs.prep.outputs.version }}'
+          $found = $null
+          try {
+            $found = Find-PSResource -Name JwtDecoder.Jwks -Version $version -Repository PSGallery -ErrorAction SilentlyContinue 2>$null
+          } catch { }
+          if ($found) {
+            throw "JwtDecoder.Jwks $version is already published to PSGallery. Bump the tag and try again."
+          }
+          Write-Host "PSGallery does not yet have JwtDecoder.Jwks $version. Clear to publish."
+
+      - name: Upload staged module for the publish job
+        uses: actions/upload-artifact@v4
+        with:
+          name: publish-stage-jwks
+          path: ${{ runner.temp }}/publish-stage-jwks
           if-no-files-found: error
           retention-days: 7
 
@@ -528,6 +625,93 @@ jobs:
             ${{ runner.temp }}/stage/JwtDecoder/JwtDecoder.Core.dll
 
   # ---------------------------------------------------------------------
+  # Job 4b: publish JwtDecoder.Jwks to PSGallery. Same `powershell-gallery`
+  # environment gate / dry-run flag / API-key handling as publish-module.
+  #
+  # PSGallery API-key prerequisite (manual one-time setup):
+  #   The POWERSHELL_GALLERY_API_KEY environment secret used by both
+  #   PSGallery publish jobs is account-scoped, so the same key works
+  #   for JwtDecoder AND JwtDecoder.Jwks once the publisher has uploaded
+  #   the first version of each module. Rotate keys per the gallery's
+  #   normal rotation policy.
+  # ---------------------------------------------------------------------
+  publish-jwks-module:
+    name: Publish JwtDecoder.Jwks module to PowerShell Gallery
+    needs: [prep, validate-jwks-module]
+    runs-on: windows-latest
+    environment: powershell-gallery
+
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Download staged module
+        uses: actions/download-artifact@v4
+        with:
+          name: publish-stage-jwks
+          path: ${{ runner.temp }}/stage-jwks
+
+      - name: Initialise PSResourceGet repository store
+        shell: pwsh
+        run: |
+          $storeDir = Join-Path $env:LOCALAPPDATA 'PSResourceGet'
+          New-Item -ItemType Directory -Path $storeDir -Force | Out-Null
+          Get-PSResourceRepository | Out-Null
+          $psg = Get-PSResourceRepository -Name PSGallery -ErrorAction SilentlyContinue
+          if (-not $psg) {
+            Register-PSResourceRepository -PSGallery -Trusted
+          } elseif (-not $psg.Trusted) {
+            Set-PSResourceRepository -Name PSGallery -Trusted
+          }
+
+      - name: Publish-PSResource (dry-run or live)
+        shell: pwsh
+        env:
+          PSG_KEY: ${{ secrets.POWERSHELL_GALLERY_API_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:PSG_KEY)) {
+            throw "POWERSHELL_GALLERY_API_KEY secret is not set on the 'powershell-gallery' environment."
+          }
+          $modulePath   = Join-Path '${{ runner.temp }}' 'stage-jwks' 'JwtDecoder.Jwks'
+          $manifestPath = Join-Path $modulePath 'JwtDecoder.Jwks.psd1'
+          if (-not (Test-Path $manifestPath)) {
+            throw "Staged manifest not found at $manifestPath"
+          }
+
+          $version = '${{ needs.prep.outputs.version }}'
+          $m = Test-ModuleManifest -Path $manifestPath
+          $manifestVersion = "$($m.Version)"
+          Write-Host "Tag-derived version : '$version'"
+          Write-Host "Manifest ModuleVersion: '$manifestVersion'"
+
+          if ($manifestVersion -match '^[vV]') { throw "ModuleVersion starts with 'v'." }
+          if ($manifestVersion -match '\s')    { throw "ModuleVersion contains whitespace." }
+          if ($manifestVersion -ne $version) {
+            throw "Manifest version '$manifestVersion' != tag-derived '$version'."
+          }
+
+          if ('${{ inputs.dry_run }}' -eq 'true') {
+            Write-Host "DRY RUN: Publish-PSResource -WhatIf"
+            Publish-PSResource -Path $modulePath -Repository PSGallery -ApiKey $env:PSG_KEY -WhatIf -Verbose
+          } else {
+            Publish-PSResource -Path $modulePath -Repository PSGallery -ApiKey $env:PSG_KEY -Verbose
+            Write-Host "Published JwtDecoder.Jwks $version"
+            Write-Host "URL: https://www.powershellgallery.com/packages/JwtDecoder.Jwks/$version"
+          }
+
+      - name: Attest build provenance
+        if: ${{ success() && !inputs.dry_run }}
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            ${{ runner.temp }}/stage-jwks/JwtDecoder.Jwks/JwtDecoder.Jwks.psd1
+            ${{ runner.temp }}/stage-jwks/JwtDecoder.Jwks/JwtDecoder.Jwks.PowerShell.dll
+            ${{ runner.temp }}/stage-jwks/JwtDecoder.Jwks/JwtDecoder.JwksFetcher.dll
+            ${{ runner.temp }}/stage-jwks/JwtDecoder.Jwks/JwtDecoder.Core.dll
+
+  # ---------------------------------------------------------------------
   # Job 5: pack + publish JwtDecoder.Core AND JwtDecoder.JwksFetcher to
   # nuget.org AND GitHub Packages. Gated by the same `powershell-gallery`
   # environment that protects the PSGallery key, so a single approval
@@ -806,7 +990,7 @@ jobs:
   # ---------------------------------------------------------------------
   create-release:
     name: Create GitHub Release with CLI assets
-    needs: [prep, build-cli, publish-module, publish-nuget]
+    needs: [prep, build-cli, publish-module, publish-jwks-module, publish-nuget]
     if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
 
