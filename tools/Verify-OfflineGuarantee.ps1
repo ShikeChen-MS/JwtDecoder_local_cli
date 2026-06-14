@@ -147,6 +147,13 @@ function Test-ManagedAssembly {
     $outFile = Join-Path $DisasmOutDir ("$Label.il")
     Write-Host "  disassembling $Label -> $outFile" -ForegroundColor DarkGray
     & ilspycmd -il $DllPath 2>&1 | Out-File -FilePath $outFile -Encoding utf8
+    # Treat any non-zero exit code or empty/missing output as a verifier failure.
+    # Without this, a silently-broken ilspycmd would let networking-bearing IL
+    # slip through (final-review B3).
+    if ($LASTEXITCODE -ne 0) {
+        Fail "$Label : ilspycmd exited with code $LASTEXITCODE."
+        return
+    }
     if (-not (Test-Path $outFile) -or (Get-Item $outFile).Length -eq 0) {
         Fail "$Label : ilspycmd produced no IL output."
         return
@@ -154,7 +161,9 @@ function Test-ManagedAssembly {
     $content = Get-Content -LiteralPath $outFile -Raw
     $hits = New-Object System.Collections.Generic.List[string]
     foreach ($pat in $forbiddenIlPatterns) {
-        $matchInfo = [regex]::Matches($content, $pat)
+        # Case-insensitive matching defends against future IL-rendering
+        # changes that might lowercase parts of type/namespace names.
+        $matchInfo = [regex]::Matches($content, $pat, [Text.RegularExpressions.RegexOptions]::IgnoreCase)
         if ($matchInfo.Count -gt 0) {
             $hits.Add("    ${pat}: $($matchInfo.Count) hit(s)") | Out-Null
         }
@@ -184,44 +193,88 @@ $forbiddenNativeLibs = @(
 
 function Get-ImportsOutput {
     if ($IsWindows) {
-        # dumpbin lives in the MSVC toolchain. AOT publish already requires it,
-        # so we expect it to be reachable through vcvars / the developer prompt.
         $dumpbin = Get-Command dumpbin -ErrorAction SilentlyContinue
         if (-not $dumpbin) {
-            return [pscustomobject]@{ Status = 'missing'; Tool = 'dumpbin'; Output = $null }
+            return [pscustomobject]@{ Status = 'missing'; Tool = 'dumpbin'; Output = $null; SymbolOutput = $null }
         }
+        # `dumpbin /imports` lists imported function NAMES per imported DLL,
+        # which catches both library-level and function-level dependencies.
         $out = & dumpbin /imports $AotExePath 2>&1
-        return [pscustomobject]@{ Status = 'ok'; Tool = 'dumpbin'; Output = ($out | Out-String) }
+        if ($LASTEXITCODE -ne 0) {
+            return [pscustomobject]@{ Status = 'tool-failed'; Tool = 'dumpbin'; Output = ($out | Out-String); SymbolOutput = $null }
+        }
+        return [pscustomobject]@{ Status = 'ok'; Tool = 'dumpbin'; Output = ($out | Out-String); SymbolOutput = ($out | Out-String) }
     }
     elseif ($IsLinux) {
         $tool = Get-Command objdump -ErrorAction SilentlyContinue
-        if (-not $tool) { return [pscustomobject]@{ Status = 'missing'; Tool = 'objdump'; Output = $null } }
-        $out = & objdump -p $AotExePath 2>&1
-        return [pscustomobject]@{ Status = 'ok'; Tool = 'objdump'; Output = ($out | Out-String) }
+        if (-not $tool) { return [pscustomobject]@{ Status = 'missing'; Tool = 'objdump'; Output = $null; SymbolOutput = $null } }
+        $deps = & objdump -p $AotExePath 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            return [pscustomobject]@{ Status = 'tool-failed'; Tool = 'objdump'; Output = ($deps | Out-String); SymbolOutput = $null }
+        }
+        # `objdump -T` lists DYNAMIC symbols (incl. undefined / imported). On
+        # Linux AOT, socket APIs would be P/Invoked from libc and appear here
+        # as UND (undefined) entries that the dynamic loader resolves at
+        # runtime. Library deny-list alone misses this — libc is universally
+        # NEEDED so we cannot ban it; we ban the function NAMES instead.
+        $syms = & objdump -T $AotExePath 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $syms = ''   # symbols are nice-to-have; treat as empty if objdump can't read them
+        }
+        return [pscustomobject]@{
+            Status = 'ok'; Tool = 'objdump';
+            Output = ($deps | Out-String);
+            SymbolOutput = ($syms | Out-String)
+        }
     }
     elseif ($IsMacOS) {
         $tool = Get-Command otool -ErrorAction SilentlyContinue
-        if (-not $tool) { return [pscustomobject]@{ Status = 'missing'; Tool = 'otool'; Output = $null } }
-        $out = & otool -L $AotExePath 2>&1
-        return [pscustomobject]@{ Status = 'ok'; Tool = 'otool'; Output = ($out | Out-String) }
+        if (-not $tool) { return [pscustomobject]@{ Status = 'missing'; Tool = 'otool'; Output = $null; SymbolOutput = $null } }
+        $libs = & otool -L $AotExePath 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            return [pscustomobject]@{ Status = 'tool-failed'; Tool = 'otool'; Output = ($libs | Out-String); SymbolOutput = $null }
+        }
+        # `nm -u` lists undefined symbols (would-be imports). Used to catch
+        # socket APIs resolved from libSystem / libc at runtime.
+        $nm = Get-Command nm -ErrorAction SilentlyContinue
+        $syms = ''
+        if ($nm) {
+            $syms = (& nm -u $AotExePath 2>&1 | Out-String)
+        }
+        return [pscustomobject]@{
+            Status = 'ok'; Tool = 'otool';
+            Output = ($libs | Out-String);
+            SymbolOutput = $syms
+        }
     }
-    return [pscustomobject]@{ Status = 'unknown-os'; Tool = ''; Output = $null }
+    return [pscustomobject]@{ Status = 'unknown-os'; Tool = ''; Output = $null; SymbolOutput = $null }
 }
 
 $importsInfo = Get-ImportsOutput
 if ($importsInfo.Status -eq 'missing') {
     Fail "native imports tool '$($importsInfo.Tool)' is not on PATH; cannot inspect AOT binary."
 }
+elseif ($importsInfo.Status -eq 'tool-failed') {
+    Fail "native imports tool '$($importsInfo.Tool)' exited with an error; refusing to interpret a partial result."
+}
 elseif ($importsInfo.Status -ne 'ok') {
     Fail "unknown OS for native imports inspection: $($importsInfo.Status)"
 }
 else {
     $importsTxt = $importsInfo.Output
-    # Save the imports listing as a transparency artifact alongside the IL.
+    $symbolsTxt = $importsInfo.SymbolOutput
+    # Save BOTH the imports listing AND the symbol listing as transparency
+    # artifacts so downstream auditors can re-run the same greps.
     $importsArtifact = Join-Path $DisasmOutDir ("jwtdecode.aot.imports.$($importsInfo.Tool).txt")
     Set-Content -LiteralPath $importsArtifact -Value $importsTxt
     Write-Host "  saved $importsArtifact" -ForegroundColor DarkGray
+    if ($symbolsTxt -and $symbolsTxt -ne $importsTxt) {
+        $symbolsArtifact = Join-Path $DisasmOutDir ("jwtdecode.aot.symbols.$($importsInfo.Tool).txt")
+        Set-Content -LiteralPath $symbolsArtifact -Value $symbolsTxt
+        Write-Host "  saved $symbolsArtifact" -ForegroundColor DarkGray
+    }
 
+    # B.1: library-level deny-list (the original check).
     $bad = @()
     foreach ($lib in $forbiddenNativeLibs) {
         if ($importsTxt -match "(?i)$lib") { $bad += $lib }
@@ -230,6 +283,32 @@ else {
         Fail "AOT binary links forbidden native libraries: $($bad -join ', ')"
     } else {
         Pass "AOT binary links no forbidden native libraries."
+    }
+
+    # B.2: function-level deny-list. Defends against the case where the
+    # binary statically links libc / System (universally NEEDED on Linux/
+    # macOS so we can't ban the library itself) and P/Invokes socket APIs.
+    # On Windows the dumpbin /imports output already names imported
+    # functions per DLL, so this scan applies the same denylist there too.
+    # (Final-review B3.)
+    $forbiddenSocketSymbols = @(
+        'socket', 'connect', 'accept', 'bind', 'listen',
+        'getaddrinfo', 'gethostbyname', 'gethostbyaddr',
+        'send', 'sendto', 'recv', 'recvfrom',
+        'WSAConnect', 'WSAStartup', 'WSASocketA', 'WSASocketW',
+        'closesocket'
+    )
+    $symSearchSpace = if ($symbolsTxt) { $symbolsTxt } else { $importsTxt }
+    $badSym = @()
+    foreach ($sym in $forbiddenSocketSymbols) {
+        # Word-boundary match keeps "send" from matching "sendmsg" but also
+        # from matching unrelated substrings in compiler-generated strings.
+        if ($symSearchSpace -match "(?im)\b$sym\b") { $badSym += $sym }
+    }
+    if ($badSym.Count -gt 0) {
+        Fail "AOT binary imports forbidden socket symbols: $($badSym -join ', ')"
+    } else {
+        Pass "AOT binary imports no forbidden socket function names."
     }
 }
 

@@ -36,13 +36,26 @@ internal sealed class HttpsTestServer : IAsyncDisposable
         _caTempDir = caTempDir;
     }
 
-    public static async Task<HttpsTestServer> StartAsync(Action<WebApplication> configure)
+    public static async Task<HttpsTestServer> StartAsync(Action<WebApplication> configure, string? sanHost = null)
     {
         using var rsa = RSA.Create(2048);
-        var req = new CertificateRequest("CN=localhost", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        var req = new CertificateRequest("CN=" + (sanHost ?? "localhost"), rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
         var san = new SubjectAlternativeNameBuilder();
-        san.AddDnsName("localhost");
-        san.AddIpAddress(IPAddress.Loopback);
+        if (sanHost is null)
+        {
+            // Default: bind to loopback and trust loopback. Standard happy-path
+            // fixture used by every existing test.
+            san.AddDnsName("localhost");
+            san.AddIpAddress(IPAddress.Loopback);
+        }
+        else
+        {
+            // Custom: serve a cert whose SAN does NOT match the actual host
+            // we listen on (127.0.0.1). This is the fixture used by the
+            // "--ca-bundle must still reject hostname mismatch" test
+            // (final-review B1). Intentionally omits the IP SAN.
+            san.AddDnsName(sanHost);
+        }
         req.CertificateExtensions.Add(san.Build());
         var now = DateTimeOffset.UtcNow;
         using var selfSigned = req.CreateSelfSigned(now.AddMinutes(-5), now.AddHours(1));

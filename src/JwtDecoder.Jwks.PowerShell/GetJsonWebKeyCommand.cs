@@ -133,7 +133,11 @@ public sealed class GetJsonWebKeyCommand : PSCmdlet
                     }
                 case ParamSetIssuer:
                     {
-                        var r = OidcDiscoveryClient.DiscoverAndFetchJwksAsync(Issuer!, fopts)
+                        var discoveryOpts = new OidcDiscoveryOptions
+                        {
+                            RequireSameHostJwksUri = RequireSameHostJwksUri.IsPresent,
+                        };
+                        var r = OidcDiscoveryClient.DiscoverAndFetchJwksAsync(Issuer!, fopts, discoveryOpts)
                             .GetAwaiter().GetResult();
                         jwksBytes = r.JwksDocument;
                         sourceUri = r.JwksUri;
@@ -141,10 +145,6 @@ public sealed class GetJsonWebKeyCommand : PSCmdlet
                         {
                             WriteWarning(
                                 $"jwks_uri host '{r.JwksUri.Host}' differs from issuer host '{Issuer!.Host}'.");
-                            if (RequireSameHostJwksUri.IsPresent)
-                                ThrowTerminatingError(new ErrorRecord(
-                                    new InvalidDataException("-RequireSameHostJwksUri rejected the cross-host jwks_uri."),
-                                    "CrossHostRefused", ErrorCategory.SecurityError, null));
                         }
                         break;
                     }

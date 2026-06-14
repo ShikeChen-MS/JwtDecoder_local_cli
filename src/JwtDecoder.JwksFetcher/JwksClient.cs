@@ -98,14 +98,15 @@ public static class JwksClient
                 req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", tokenStr);
             }
 
-            if (options.ExtraHeaders is not null)
+            if (options.ExtraHeaders is not null && current.Equals(originalUri))
             {
+                // Mirror bearer-token handling: extra headers (--header-file) are
+                // attached ONLY to the originally-requested URL. A redirect target
+                // — even same-host — does not receive them. Otherwise an
+                // X-Api-Key / X-Auth-Token in --header-file would leak the same
+                // way a Bearer would. (Final-review I4.)
                 foreach (var (name, value) in options.ExtraHeaders)
                 {
-                    // Use the validating Add (CR/LF in the value throws here).
-                    // The dangerous-header denylist is enforced by the CLI layer
-                    // before headers reach us; we double-check the most lethal
-                    // ones below as defence in depth.
                     if (IsDangerousHeader(name))
                         throw new InvalidDataException(
                             $"Refusing extra request header '{name}': hop-by-hop / auth / routing headers are not permitted.");
@@ -210,8 +211,31 @@ public static class JwksClient
             case ProxyMode.Explicit:
                 if (options.ProxyUri is null)
                     throw new InvalidDataException("ProxyMode=Explicit requires ProxyUri.");
+                // Syntactic check (refuses non-HTTPS proxies, IP literals in
+                // private/loopback ranges, literal localhost) always runs.
+                SsrfPolicy.AssertHostnameAllowed(options.ProxyUri, allowLoopbackForTesting: false);
                 if (!options.AllowPrivateProxy)
-                    SsrfPolicy.AssertHostnameAllowed(options.ProxyUri, allowLoopbackForTesting: false);
+                {
+                    // DNS-resolve the proxy hostname and refuse if any
+                    // resolved address is in a deny-list range. The syntactic
+                    // check alone misses cases where a public-looking
+                    // hostname resolves to 127.0.0.1 / 10.x / 169.254 / ...
+                    // (Final-review I5.)
+                    IPAddress[] addrs;
+                    try { addrs = Dns.GetHostAddresses(options.ProxyUri.Host); }
+                    catch (System.Net.Sockets.SocketException ex)
+                    {
+                        throw new InvalidDataException(
+                            $"Proxy hostname '{options.ProxyUri.Host}' could not be resolved: {ex.Message}", ex);
+                    }
+                    foreach (var a in addrs)
+                    {
+                        if (SsrfPolicy.IsForbiddenAddress(a, allowLoopbackForTesting: false))
+                            throw new InvalidDataException(
+                                $"Proxy '{options.ProxyUri}' resolves to forbidden address {a}; " +
+                                "pass --allow-private-proxy to permit local-debug proxies (mitmproxy/Fiddler).");
+                    }
+                }
                 handler.UseProxy = true;
                 handler.Proxy = new WebProxy(options.ProxyUri)
                 {
@@ -280,6 +304,17 @@ public static class JwksClient
             handler.SslOptions.RemoteCertificateValidationCallback = (sender, cert, chain, errors) =>
             {
                 if (cert is null) return false;
+
+                // --ca-bundle REPLACES the system trust store, so we are willing
+                // to override RemoteCertificateChainErrors. We MUST NOT override
+                // RemoteCertificateNameMismatch (the cert's SAN didn't match the
+                // hostname we connected to) or RemoteCertificateNotAvailable
+                // (peer offered no cert) — those are authenticity guarantees,
+                // not trust-anchor questions. A cert signed by the supplied CA
+                // for attacker.example would otherwise authenticate any host.
+                if ((errors & SslPolicyErrors.RemoteCertificateNotAvailable) != 0) return false;
+                if ((errors & SslPolicyErrors.RemoteCertificateNameMismatch) != 0) return false;
+
                 using var customChain = new X509Chain();
                 customChain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
                 customChain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;

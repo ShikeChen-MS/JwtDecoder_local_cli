@@ -131,8 +131,17 @@ internal static class Program
             else // FromIssuer
             {
                 if (opts.Verbose) stderr.WriteLine($"discovering issuer: {opts.FromIssuer}");
+                // Pass RequireSameHostJwksUri into the library so the
+                // cross-host policy is enforced BEFORE the JWKS fetch. If
+                // we deferred to a post-fetch check here, the bearer token
+                // (when supplied) would already have leaked to the
+                // cross-host endpoint. (Final-review B2.)
+                var discoveryOpts = new JwtDecoder.JwksFetcher.OidcDiscoveryOptions
+                {
+                    RequireSameHostJwksUri = opts.RequireSameHostJwksUri,
+                };
                 var r = await JwtDecoder.JwksFetcher.OidcDiscoveryClient
-                    .DiscoverAndFetchJwksAsync(opts.FromIssuer!, fopts);
+                    .DiscoverAndFetchJwksAsync(opts.FromIssuer!, fopts, discoveryOpts);
                 jwksBytes = r.JwksDocument;
                 crossHostJwksUri = r.CrossHostJwksUri;
 
@@ -140,12 +149,7 @@ internal static class Program
                 {
                     stderr.WriteLine(
                         $"warning: jwks_uri host '{r.JwksUri.Host}' differs from issuer host '{opts.FromIssuer!.Host}' " +
-                        "(allowed but worth noting; pass --require-same-host-jwks-uri to refuse).");
-                    if (opts.RequireSameHostJwksUri)
-                    {
-                        stderr.WriteLine("Error: --require-same-host-jwks-uri rejected the cross-host jwks_uri.");
-                        return 3;
-                    }
+                        "(allowed; pass --require-same-host-jwks-uri to refuse).");
                 }
                 if (opts.Verbose) stderr.WriteLine($"jwks fetched from: {r.JwksUri}");
             }
