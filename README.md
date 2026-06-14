@@ -287,12 +287,119 @@ Get-JsonWebKey -Token $token -JwksUri https://login.example.com/keys |
 - `src/JwtDecoder.JwksFetcher/README.md` (shipped with the nupkg) for the library‑level docs.
 - `src/JwtDecoder.Jwks.PowerShell/README.md` for the cmdlet's deep dive.
 
+## Offline guarantee — how it's enforced and how you can audit it
+
+The offline promise of `jwtdecode` is **not** a claim made on a feature checklist. It is enforced by a layered scanner that runs in CI on every artifact-producing workflow (gating the upload), and that **you can run yourself** in under a minute against any binary you downloaded — with no need to trust our reading of the output.
+
+### The promise (and its precise scope)
+
+| In scope (offline-by-construction)        | Out of scope (network-capable by design) |
+|-------------------------------------------|------------------------------------------|
+| `jwtdecode.exe` (Native AOT CLI)          | `jwksfetch.exe`                          |
+| `JwtDecoder` PowerShell module            | `JwtDecoder.Jwks` PowerShell module      |
+| `JwtDecoder.Core` NuGet package           | `JwtDecoder.JwksFetcher` NuGet package    |
+
+A normally-functioning binary in the **left** column cannot open a socket, resolve a hostname, or otherwise reach the network. Its only I/O channels are filesystem reads (token / key file), stdin (token bytes or PEM key bytes for `--key-file -`), stdout (decoded JSON / verification result), and stderr (errors / warnings). No DNS lookup. No HTTP. No proxy. No telemetry.
+
+The **right** column carries all networking — pipe `jwksfetch | jwtdecode --key-file -` and the network trust boundary moves to whoever produced the PEM that `jwtdecode` reads from stdin.
+
+### What the scanner checks — `tools/Verify-OfflineGuarantee.ps1`
+
+Five independent checks. Four are pass/fail (`A`, `B`, `D`, `E`); any one failure aborts the workflow and the artifact never ships. The fifth (`C`) is informational only — explicitly documented as a heuristic so the strict signals stay credible.
+
+| # | Layer | Tool | What it proves |
+|--:|-------|------|----------------|
+| **A** | Managed IL grep | `ilspycmd` 10.1.0.8386 (version-pinned for supply-chain hygiene) | No reference in `JwtDecoder.Core.dll` or the pre-AOT `jwtdecode.dll` to `[System.Net.Http]`, `[System.Net.Sockets]`, `[System.Net.WebSockets]`, `[System.Net.NetworkInformation]`, `[System.Net.Mail]`, `[System.Net.Primitives]`, `[System.Net.NameResolution]`, `[System.Net.Security]`, `[System.Net.Quic]`, `[System.Web*]`, `System.Net.WebClient`/`WebRequest`/`HttpWebRequest`/`Dns`, P/Invoke into `ws2_32` / `wininet` / `winhttp` / `urlmon` / `iphlpapi` / `dnsapi` / `libcurl` / `libssl` / `libssh2` / `nghttp2`, or reflective load attempts (`ldstr "System.Net.Http"`, `NativeLibrary::Load …ws2_32`, etc.). |
+| **B** | Native AOT import inspection | `dumpbin /imports` (Windows), `objdump -p` + `objdump -T` (Linux), `otool -L` + `nm -u` (macOS) | The compiled AOT exe links no networking library (Windows DLL or *nix shared object) **and** imports no forbidden socket symbol (`socket`, `connect`, `getaddrinfo`, `gethostbyname`, `WSAStartup`, etc., including glibc `__GI_socket` aliases, Windows `__imp_socket@4` decorations, and glibc-versioned `socket@GLIBC_2.2.5` suffixes). On Unix, libc / libSystem cannot be library-deny-listed (they're universally NEEDED) so the symbol scan is the *only* signal — empty output or tool failure is **fail-closed**. |
+| **C** | Raw-bytes string heuristic | PowerShell `-match` over the AOT exe bytes | Lists any networking type-name strings present anywhere in the binary. Explicitly marked **informational**: type-name strings often appear in BCL infrastructure that is not reachable from `jwtdecode`'s entrypoint. Layer-B is the authoritative signal for the AOT exe; Layer-C is shown for transparency only. |
+| **D** | Transitive NuGet package check | `dotnet list package --include-transitive` | Neither `JwtDecoder.Core.csproj` nor `JwtDecoder.csproj` pulls a forbidden package (`System.Net.*`, `Microsoft.Extensions.Http`, `RestSharp`, `Flurl*`, etc.). Catches the supply-chain case where a future PR adds a dependency that itself transitively depends on networking. |
+| **E** | Scan-vs-upload SHA-256 | PowerShell `Get-FileHash` | The exact binary the scanner inspected is the exact binary uploaded as the release artifact — bit-for-bit. Defends against any build step between scan and upload that could swap in a different binary. |
+
+The IL dumps from layer **A** and the native imports listing from layer **B** are **uploaded as a transparency artifact** with every release, named `offline-guarantee-<rid>-Release-<sha>`. Download it from the workflow run page and re-grep it yourself — you don't have to trust our reading of the output.
+
+Plus, every published AOT binary carries a Sigstore-backed [build-provenance attestation](https://github.com/ShikeChen-MS/JwtDecoder_local_cli/attestations) — `gh attestation verify <file> --owner ShikeChen-MS` confirms the binary came from this repo's CI, signed by GitHub's OIDC identity for this workflow at this commit.
+
+### How to audit a release yourself (≈ 1 minute)
+
+You need three things, all open and stable:
+
+1. The published `jwtdecode` binary for your platform — from the [GitHub Release](https://github.com/ShikeChen-MS/JwtDecoder_local_cli/releases).
+2. A clone of this repository at the tag matching that binary (for the verifier script).
+3. The .NET SDK ≥ 10.0.x (only needed once, to install `ilspycmd`).
+
+```powershell
+# 1. Clone at the matching tag
+git clone --depth 1 --branch <tag> https://github.com/ShikeChen-MS/JwtDecoder_local_cli.git
+cd JwtDecoder_local_cli
+
+# 2. Windows only: make `dumpbin` reachable. (Skip on Linux/macOS — objdump/nm
+#    are pre-installed.) The simplest path is to run from a Developer
+#    PowerShell for Visual Studio. Or, fully scripted:
+$vsInstall = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+                -latest -property installationPath
+$dumpbin = Get-ChildItem "$vsInstall\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe |
+           Where-Object { $_.FullName -match 'HostX64\\x64' } | Select-Object -First 1
+$env:PATH = "$($dumpbin.Directory.FullName);$env:PATH"
+
+# 3. Run the verifier. It auto-installs the pinned ilspycmd if needed.
+pwsh -File tools/Verify-OfflineGuarantee.ps1 `
+  -CoreDllPath        <path>\JwtDecoder.Core.dll `
+  -ManagedCliDllPath  <path>\jwtdecode.dll `
+  -AotExePath         <path>\jwtdecode.exe `
+  -CoreProjectPath    src\JwtDecoder.Core\JwtDecoder.Core.csproj `
+  -CliProjectPath     src\JwtDecoder\JwtDecoder.csproj
+```
+
+Expected verdict at the bottom of the output:
+
+```
+[A] Managed IL inspection (ilspycmd)
+  PASS  JwtDecoder.Core IL contains no networking references.
+  PASS  jwtdecode IL contains no networking references.
+
+[B] Native AOT binary import inspection
+  PASS  AOT binary links no forbidden native libraries.
+  PASS  AOT binary imports no forbidden socket function names.
+
+[C] Raw-bytes string heuristic (informational)
+  WARN  AOT binary contains networking-type name strings (not necessarily reachable): …
+  WARN  Layer-C is heuristic. Layer-B (native imports) is the authoritative signal.
+
+[D] Transitive NuGet package check
+  PASS  JwtDecoder.Core has no forbidden transitive packages.
+  PASS  jwtdecode (CLI) has no forbidden transitive packages.
+
+[E] Scan-vs-upload SHA-256 integrity
+  PASS  Scan-vs-upload SHA-256 match (…).
+
+OFFLINE GUARANTEE: PASS
+```
+
+The Layer-C `WARN` is normal — see the table above. The transparency artifacts (raw IL dump, raw native imports listing) are written to `ci-artifacts/disasm/` so you can re-grep them with your own tooling.
+
+### Skim the IL yourself (the 30-second sanity check)
+
+If you don't trust our deny-list, point `ilspycmd` at the binary and look for **anything** networking-related:
+
+```powershell
+dotnet tool install -g ilspycmd --version 10.1.0.8386
+ilspycmd -il <path>\jwtdecode.dll | Select-String -Pattern 'System\.Net|pinvokeimpl|NativeLibrary::Load'
+```
+
+A clean run prints nothing. If you find a hit that isn't already on `$forbiddenIlPatterns` in `tools/Verify-OfflineGuarantee.ps1`, please file an issue — that means our deny-list is incomplete and the verifier could give false PASSes. **We want to know.**
+
+### What this guarantee does NOT cover
+
+- **`jwksfetch.exe`, the `JwtDecoder.Jwks` PowerShell module, and the `JwtDecoder.JwksFetcher` NuGet package are network-capable by design.** Importing the PS module into a session loads `System.Net.Http` into that session. The trust boundary is documented above ([Trust boundary — read this twice](#trust-boundary--read-this-twice)).
+- **The verifier runs on the binary we built**, not on a binary an attacker substituted on disk. Combine it with the Sigstore attestation check above (`gh attestation verify …`) to close the substitution gap.
+- **The verifier does not protect against runtime bugs** (parser errors, oversized-input handling, etc.). Those are unrelated security concerns — see the [Security notes](#security-notes) section below, and file bugs separately.
+
 ## Security notes
 
 This tool is built for a no-compromise threat model: offline-only, security-first, drop-the-feature-if-it-weakens-anything.
 
 **Network isolation**
-- The `jwtdecode` process opens no sockets and resolves no hosts. Only filesystem reads (token / key file), stdin, stdout and stderr are used. Verified at every CI run by `tools/Verify-OfflineGuarantee.ps1` (managed IL grep + native binary import inspection + transitive package check + scan‑vs‑upload SHA‑256 equality). The IL disassembly + import listings are attached to every release as a transparency artifact.
+- The `jwtdecode` process opens no sockets and resolves no hosts. See the dedicated [Offline guarantee](#offline-guarantee--how-its-enforced-and-how-you-can-audit-it) section above for exactly how this is enforced in CI and how you can audit it yourself.
 
 **Algorithm-confusion guard (CVE-pattern: JWT alg=HS256 + RSA public key as MAC secret)**
 - If the JWT's `alg` is `HS*` and the supplied key file *looks like PEM*, the tool refuses to verify and exits with code `2`. This blocks the well-known class of attacks where an attacker repurposes a published RSA/EC public key as an HMAC shared secret.
