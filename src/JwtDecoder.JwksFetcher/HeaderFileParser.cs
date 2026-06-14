@@ -31,14 +31,9 @@ public static class HeaderFileParser
     /// <exception cref="InvalidDataException">Format or denylist violation.</exception>
     public static IReadOnlyList<(string Name, string Value)> ParseFile(string path)
     {
-        var info = new FileInfo(path);
-        if (!info.Exists)
-            throw new FileNotFoundException($"Header file not found: {path}", path);
-        if (info.Length > MaxHeaderFileBytes)
-            throw new InvalidDataException(
-                $"Header file '{path}' is {info.Length:N0} bytes; max {MaxHeaderFileBytes:N0}.");
-
-        string text = File.ReadAllText(path);
+        // Bounded streaming read avoids TOCTOU on a growing file.
+        // (Round-5 I1.)
+        string text = BoundedFileReader.ReadAllText(path, MaxHeaderFileBytes, "Header file");
         return Parse(text);
     }
 

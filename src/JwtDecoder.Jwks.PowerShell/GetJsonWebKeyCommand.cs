@@ -227,37 +227,13 @@ public sealed class GetJsonWebKeyCommand : PSCmdlet
     }
 
     /// <summary>
-    /// Read a file as bytes but refuse anything over <paramref name="maxBytes"/>,
-    /// using a streaming reader so a file growing between size-check and read
-    /// can't slip past the cap. Matches the CLI's bounded-read semantics so
-    /// huge local files can't cause a managed OOM before the parser's own
-    /// size caps trigger (final-review I8 / F5).
+    /// Read a file as bytes but refuse anything over <paramref name="maxBytes"/>.
+    /// Delegates to the shared <see cref="JwtDecoder.JwksFetcher.BoundedFileReader"/>
+    /// so the cmdlet, CLI, and library all use one TOCTOU-safe implementation.
+    /// (Round-5 I1.)
     /// </summary>
     private static byte[] ReadFileBounded(string path, int maxBytes, string sourceName)
-    {
-        if (!File.Exists(path))
-            throw new FileNotFoundException($"{sourceName} not found: {path}", path);
-
-        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
-            bufferSize: 4096, useAsync: false);
-
-        // Read into a single buffer sized to maxBytes + 1 so we can tell
-        // "size cap exceeded" from "file is exactly maxBytes". The +1 byte
-        // is never returned.
-        byte[] buf = new byte[maxBytes + 1];
-        int total = 0;
-        int n;
-        while ((n = fs.Read(buf, total, buf.Length - total)) > 0)
-        {
-            total += n;
-            if (total > maxBytes)
-                throw new InvalidDataException(
-                    $"{sourceName} '{path}' exceeds maximum of {maxBytes:N0} bytes.");
-        }
-        byte[] exact = new byte[total];
-        Buffer.BlockCopy(buf, 0, exact, 0, total);
-        return exact;
-    }
+        => BoundedFileReader.ReadAllBytes(path, maxBytes, sourceName);
 
     private FetcherOptions BuildFetcherOptions()
     {
@@ -278,12 +254,8 @@ public sealed class GetJsonWebKeyCommand : PSCmdlet
         if (BearerTokenFile is not null)
         {
             string resolved = GetUnresolvedProviderPathFromPSPath(BearerTokenFile);
-            var info = new FileInfo(resolved);
-            if (!info.Exists)
-                throw new FileNotFoundException($"Bearer-token file not found: {resolved}", resolved);
-            if (info.Length > 16 * 1024)
-                throw new InvalidDataException($"Bearer-token file too large: {info.Length} bytes (max 16384).");
-            bearer = File.ReadAllBytes(resolved);
+            // Streaming bounded read (round-5 I1).
+            bearer = BoundedFileReader.ReadAllBytes(resolved, 16 * 1024, "Bearer-token file");
             int len = bearer.Length;
             if (len >= 2 && bearer[len - 2] == (byte)'\r' && bearer[len - 1] == (byte)'\n') len -= 2;
             else if (len >= 1 && bearer[len - 1] == (byte)'\n') len -= 1;

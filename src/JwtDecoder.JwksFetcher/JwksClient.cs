@@ -368,29 +368,19 @@ public static class JwksClient
 
     private static X509Certificate2Collection LoadPemCertificateCollection(string path)
     {
-        // Bounded read so a giant PEM file can't cause managed OOM before
-        // ImportFromPem parses it. (Final-review F5.)
-        if (!File.Exists(path))
-            throw new InvalidDataException($"CA bundle '{path}' not found.");
-
+        // Delegate to the shared streaming bounded reader so all four file-input
+        // sites (CA bundle, token file, JWKS file, bearer-token file, header
+        // file) use one TOCTOU-safe implementation. (Round-5 I1.)
         string pem;
         try
         {
-            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
-                bufferSize: 4096, useAsync: false);
-            byte[] buf = new byte[MaxCaBundleBytes + 1];
-            int total = 0;
-            int n;
-            while ((n = fs.Read(buf, total, buf.Length - total)) > 0)
-            {
-                total += n;
-                if (total > MaxCaBundleBytes)
-                    throw new InvalidDataException(
-                        $"CA bundle '{path}' exceeds maximum of {MaxCaBundleBytes:N0} bytes.");
-            }
-            pem = System.Text.Encoding.UTF8.GetString(buf, 0, total);
+            pem = BoundedFileReader.ReadAllText(path, MaxCaBundleBytes, "CA bundle");
         }
         catch (InvalidDataException) { throw; }
+        catch (FileNotFoundException)
+        {
+            throw new InvalidDataException($"CA bundle '{path}' not found.");
+        }
         catch (Exception ex)
         {
             throw new InvalidDataException($"Could not read CA bundle '{path}': {ex.Message}", ex);

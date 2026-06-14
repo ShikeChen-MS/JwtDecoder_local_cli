@@ -260,15 +260,12 @@ internal static class Program
     }
 
     private static byte[] ReadFileBounded(string path, int maxBytes, string sourceName)
-    {
-        var info = new FileInfo(path);
-        if (!info.Exists)
-            throw new FileNotFoundException($"{sourceName} not found: {path}", path);
-        if (info.Length > maxBytes)
-            throw new InvalidDataException(
-                $"{sourceName} '{path}' is {info.Length:N0} bytes; max {maxBytes:N0}.");
-        return File.ReadAllBytes(path);
-    }
+        // Round-5 I1: delegate to the shared streaming bounded reader so the
+        // CLI, the PowerShell cmdlet, and the JwksFetcher library all use one
+        // TOCTOU-safe implementation. (Previously this site combined
+        // FileInfo.Length with File.ReadAllBytes, which could be raced by a
+        // growing file.)
+        => JwtDecoder.JwksFetcher.BoundedFileReader.ReadAllBytes(path, maxBytes, sourceName);
 
     private static byte[] ReadStreamBounded(Stream stream, int maxBytes, string sourceName)
     {

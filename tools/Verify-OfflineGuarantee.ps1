@@ -221,14 +221,21 @@ function Get-ImportsOutput {
         # as UND (undefined) entries that the dynamic loader resolves at
         # runtime. Library deny-list alone misses this — libc is universally
         # NEEDED so we cannot ban it; we ban the function NAMES instead.
+        # MUST fail closed on tool failure / empty output: the symbol scan is
+        # the ONLY thing catching socket(), connect(), etc. on Linux. If it
+        # silently degrades to "" we false-pass. (Final-review round-5 B1.)
         $syms = & objdump -T $AotExePath 2>&1
         if ($LASTEXITCODE -ne 0) {
-            $syms = ''   # symbols are nice-to-have; treat as empty if objdump can't read them
+            return [pscustomobject]@{ Status = 'tool-failed'; Tool = 'objdump -T'; Output = ($deps | Out-String); SymbolOutput = $null }
+        }
+        $symsStr = ($syms | Out-String)
+        if ([string]::IsNullOrWhiteSpace($symsStr)) {
+            return [pscustomobject]@{ Status = 'symbols-empty'; Tool = 'objdump -T'; Output = ($deps | Out-String); SymbolOutput = $null }
         }
         return [pscustomobject]@{
             Status = 'ok'; Tool = 'objdump';
             Output = ($deps | Out-String);
-            SymbolOutput = ($syms | Out-String)
+            SymbolOutput = $symsStr
         }
     }
     elseif ($IsMacOS) {
@@ -238,17 +245,27 @@ function Get-ImportsOutput {
         if ($LASTEXITCODE -ne 0) {
             return [pscustomobject]@{ Status = 'tool-failed'; Tool = 'otool'; Output = ($libs | Out-String); SymbolOutput = $null }
         }
-        # `nm -u` lists undefined symbols (would-be imports). Used to catch
-        # socket APIs resolved from libSystem / libc at runtime.
+        # On macOS, libSystem cannot be library-denied (it's the universal C
+        # runtime). `nm -u` is the only signal for socket() / connect() /
+        # getaddrinfo() being P/Invoked. We REQUIRE nm here, and fail
+        # closed on missing / non-zero exit / empty output. (Final-review
+        # round-5 B1.)
         $nm = Get-Command nm -ErrorAction SilentlyContinue
-        $syms = ''
-        if ($nm) {
-            $syms = (& nm -u $AotExePath 2>&1 | Out-String)
+        if (-not $nm) {
+            return [pscustomobject]@{ Status = 'missing'; Tool = 'nm'; Output = ($libs | Out-String); SymbolOutput = $null }
+        }
+        $syms = & nm -u $AotExePath 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            return [pscustomobject]@{ Status = 'tool-failed'; Tool = 'nm -u'; Output = ($libs | Out-String); SymbolOutput = $null }
+        }
+        $symsStr = ($syms | Out-String)
+        if ([string]::IsNullOrWhiteSpace($symsStr)) {
+            return [pscustomobject]@{ Status = 'symbols-empty'; Tool = 'nm -u'; Output = ($libs | Out-String); SymbolOutput = $null }
         }
         return [pscustomobject]@{
             Status = 'ok'; Tool = 'otool';
             Output = ($libs | Out-String);
-            SymbolOutput = $syms
+            SymbolOutput = $symsStr
         }
     }
     return [pscustomobject]@{ Status = 'unknown-os'; Tool = ''; Output = $null; SymbolOutput = $null }
@@ -256,10 +273,17 @@ function Get-ImportsOutput {
 
 $importsInfo = Get-ImportsOutput
 if ($importsInfo.Status -eq 'missing') {
-    Fail "native imports tool '$($importsInfo.Tool)' is not on PATH; cannot inspect AOT binary."
+    Fail "native tool '$($importsInfo.Tool)' is not on PATH; cannot inspect AOT binary."
 }
 elseif ($importsInfo.Status -eq 'tool-failed') {
-    Fail "native imports tool '$($importsInfo.Tool)' exited with an error; refusing to interpret a partial result."
+    Fail "native tool '$($importsInfo.Tool)' exited with an error; refusing to interpret a partial result."
+}
+elseif ($importsInfo.Status -eq 'symbols-empty') {
+    # Round-5 B1: on Unix the symbol scan is the ONLY thing catching libc
+    # P/Invokes of socket()/connect()/etc. An empty result usually means the
+    # binary couldn't be parsed (stripped beyond recognition, unsupported
+    # format, etc.). Treat as a verifier failure rather than silently passing.
+    Fail "native tool '$($importsInfo.Tool)' produced empty symbol output; cannot prove no socket imports."
 }
 elseif ($importsInfo.Status -ne 'ok') {
     Fail "unknown OS for native imports inspection: $($importsInfo.Status)"
@@ -306,17 +330,18 @@ else {
     $badSym = @()
     foreach ($sym in $forbiddenSocketSymbols) {
         # Match the function name with optional platform-specific decorations:
-        #   - macOS `nm -u` prefixes C symbols with `_` (so `_socket` is the
-        #     real socket(2) call). The regex allows one-or-more leading
-        #     underscores and a non-word char (or start of line) before that.
-        #   - Windows `dumpbin /imports` may decorate stdcall exports with
-        #     `@N` (so `socket@4`). The regex tolerates a trailing `@digits`.
-        #   - Linux `objdump -T` reports the bare name; covered by the
-        #     start-of-line / non-word-boundary case.
-        # Avoids false-positives like `sendmsg` (no anchor after) and
-        # `SendMessage` (initial caps + word continuation).
-        # (Final-review F2.)
-        $pattern = "(?im)(?:^|[^A-Za-z0-9_])_*$sym(?:@\d+)?(?=$|[^A-Za-z0-9_]|@)"
+        #   - macOS `nm -u` prefixes C symbols with one or more `_`
+        #     (so `_socket`, `__socket` are real socket(2) calls).
+        #   - glibc may emit internal aliases like `__GI_socket`. The
+        #     `(?:GI_|imp_)?` group catches `_*GI_socket` and `_*imp_socket`
+        #     after the leading-underscore run.
+        #   - Versioned glibc symbols look like `socket@GLIBC_2.2.5`; the
+        #     `@\S+` suffix tolerates any non-space version string.
+        #   - Windows stdcall decoration: `socket@4`. Covered by `@\S+`.
+        # Avoids false-positives like `sendmsg` (no word boundary after) or
+        # `SendMessage` (initial caps continues the symbol).
+        # (Final-review F2 + round-5 I2.)
+        $pattern = "(?im)(?:^|[^A-Za-z0-9_])_*(?:GI_|imp_)?$sym(?:@\S+)?(?=$|[^A-Za-z0-9_])"
         if ([regex]::IsMatch($symSearchSpace, $pattern)) { $badSym += $sym }
     }
     if ($badSym.Count -gt 0) {
