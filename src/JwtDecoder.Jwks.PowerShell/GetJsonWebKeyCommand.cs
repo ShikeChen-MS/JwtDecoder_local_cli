@@ -227,19 +227,36 @@ public sealed class GetJsonWebKeyCommand : PSCmdlet
     }
 
     /// <summary>
-    /// Read a file into a byte[] but refuse anything over <paramref name="maxBytes"/>.
-    /// Matches the CLI's bounded-read semantics so a giant local file can't cause
-    /// a managed OOM before the parser's own size caps trigger (final-review I8).
+    /// Read a file as bytes but refuse anything over <paramref name="maxBytes"/>,
+    /// using a streaming reader so a file growing between size-check and read
+    /// can't slip past the cap. Matches the CLI's bounded-read semantics so
+    /// huge local files can't cause a managed OOM before the parser's own
+    /// size caps trigger (final-review I8 / F5).
     /// </summary>
     private static byte[] ReadFileBounded(string path, int maxBytes, string sourceName)
     {
-        var info = new FileInfo(path);
-        if (!info.Exists)
+        if (!File.Exists(path))
             throw new FileNotFoundException($"{sourceName} not found: {path}", path);
-        if (info.Length > maxBytes)
-            throw new InvalidDataException(
-                $"{sourceName} '{path}' is {info.Length:N0} bytes; maximum {maxBytes:N0}.");
-        return File.ReadAllBytes(path);
+
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
+            bufferSize: 4096, useAsync: false);
+
+        // Read into a single buffer sized to maxBytes + 1 so we can tell
+        // "size cap exceeded" from "file is exactly maxBytes". The +1 byte
+        // is never returned.
+        byte[] buf = new byte[maxBytes + 1];
+        int total = 0;
+        int n;
+        while ((n = fs.Read(buf, total, buf.Length - total)) > 0)
+        {
+            total += n;
+            if (total > maxBytes)
+                throw new InvalidDataException(
+                    $"{sourceName} '{path}' exceeds maximum of {maxBytes:N0} bytes.");
+        }
+        byte[] exact = new byte[total];
+        Buffer.BlockCopy(buf, 0, exact, 0, total);
+        return exact;
     }
 
     private FetcherOptions BuildFetcherOptions()

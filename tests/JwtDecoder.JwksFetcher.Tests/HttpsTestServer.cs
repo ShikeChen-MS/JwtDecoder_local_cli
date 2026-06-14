@@ -36,7 +36,10 @@ internal sealed class HttpsTestServer : IAsyncDisposable
         _caTempDir = caTempDir;
     }
 
-    public static async Task<HttpsTestServer> StartAsync(Action<WebApplication> configure, string? sanHost = null)
+    public static async Task<HttpsTestServer> StartAsync(
+        Action<WebApplication> configure,
+        string? sanHost = null,
+        bool useCodeSigningEkuOnly = false)
     {
         using var rsa = RSA.Create(2048);
         var req = new CertificateRequest("CN=" + (sanHost ?? "localhost"), rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
@@ -57,6 +60,16 @@ internal sealed class HttpsTestServer : IAsyncDisposable
             san.AddDnsName(sanHost);
         }
         req.CertificateExtensions.Add(san.Build());
+
+        if (useCodeSigningEkuOnly)
+        {
+            // EKU = Code Signing ONLY (no Server Authentication). Fixture for the
+            // F1 regression test: a cert signed by the trusted custom CA but
+            // not intended for HTTPS server use should be refused by the
+            // --ca-bundle path even if the SAN matches.
+            var ekus = new OidCollection { new Oid("1.3.6.1.5.5.7.3.3") };
+            req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(ekus, critical: false));
+        }
         var now = DateTimeOffset.UtcNow;
         using var selfSigned = req.CreateSelfSigned(now.AddMinutes(-5), now.AddHours(1));
 

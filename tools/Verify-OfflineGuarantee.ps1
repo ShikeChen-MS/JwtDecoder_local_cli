@@ -305,9 +305,19 @@ else {
     $symSearchSpace = if ($symbolsTxt) { $symbolsTxt } else { $importsTxt }
     $badSym = @()
     foreach ($sym in $forbiddenSocketSymbols) {
-        # Word-boundary match keeps "send" from matching "sendmsg" but also
-        # from matching unrelated substrings in compiler-generated strings.
-        if ($symSearchSpace -match "(?im)\b$sym\b") { $badSym += $sym }
+        # Match the function name with optional platform-specific decorations:
+        #   - macOS `nm -u` prefixes C symbols with `_` (so `_socket` is the
+        #     real socket(2) call). The regex allows one-or-more leading
+        #     underscores and a non-word char (or start of line) before that.
+        #   - Windows `dumpbin /imports` may decorate stdcall exports with
+        #     `@N` (so `socket@4`). The regex tolerates a trailing `@digits`.
+        #   - Linux `objdump -T` reports the bare name; covered by the
+        #     start-of-line / non-word-boundary case.
+        # Avoids false-positives like `sendmsg` (no anchor after) and
+        # `SendMessage` (initial caps + word continuation).
+        # (Final-review F2.)
+        $pattern = "(?im)(?:^|[^A-Za-z0-9_])_*$sym(?:@\d+)?(?=$|[^A-Za-z0-9_]|@)"
+        if ([regex]::IsMatch($symSearchSpace, $pattern)) { $badSym += $sym }
     }
     if ($badSym.Count -gt 0) {
         Fail "AOT binary imports forbidden socket symbols: $($badSym -join ', ')"

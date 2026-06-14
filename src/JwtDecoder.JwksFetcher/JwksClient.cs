@@ -4,6 +4,7 @@ using System.Net.Http.Headers;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 
@@ -211,16 +212,27 @@ public static class JwksClient
             case ProxyMode.Explicit:
                 if (options.ProxyUri is null)
                     throw new InvalidDataException("ProxyMode=Explicit requires ProxyUri.");
-                // Syntactic check (refuses non-HTTPS proxies, IP literals in
-                // private/loopback ranges, literal localhost) always runs.
-                SsrfPolicy.AssertHostnameAllowed(options.ProxyUri, allowLoopbackForTesting: false);
+                // Scheme check ALWAYS runs (refuse file://, data://, etc.). Allow
+                // both http:// and https:// for proxies; HTTPS-only is enforced
+                // on the destination, not on the proxy connection itself.
+                if (!string.Equals(options.ProxyUri.Scheme, "http", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(options.ProxyUri.Scheme, "https", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException(
+                        $"Refusing proxy URL '{options.ProxyUri}': scheme must be http or https.");
+                }
+                // Private-range check runs only when the user has NOT opted in
+                // to --allow-private-proxy. (Final-review F4 — the previous
+                // unconditional AssertHostnameAllowed broke the escape hatch
+                // for mitmproxy/Fiddler on 127.0.0.1.)
                 if (!options.AllowPrivateProxy)
                 {
-                    // DNS-resolve the proxy hostname and refuse if any
-                    // resolved address is in a deny-list range. The syntactic
-                    // check alone misses cases where a public-looking
-                    // hostname resolves to 127.0.0.1 / 10.x / 169.254 / ...
-                    // (Final-review I5.)
+                    // Syntactic check: literal IPs in private/loopback ranges, hostname `localhost`.
+                    SsrfPolicy.AssertHostnameAllowed(options.ProxyUri, allowLoopbackForTesting: false);
+                    // DNS check: hostname that resolves into a forbidden range.
+                    // The runtime ConnectCallback below provides a second check
+                    // bound to the actual TCP connection, closing the rebinding
+                    // window. (Final-review F3.)
                     IPAddress[] addrs;
                     try { addrs = Dns.GetHostAddresses(options.ProxyUri.Host); }
                     catch (System.Net.Sockets.SocketException ex)
@@ -249,8 +261,21 @@ public static class JwksClient
                 break;
         }
 
-        // --- ConnectCallback: DNS rebinding defence. Skipped when proxy is in use. ---
-        if (options.ProxyMode == ProxyMode.None)
+        // --- ConnectCallback: DNS rebinding defence. ---
+        // Active on EVERY mode where we can route the actual TCP connect:
+        //   - ProxyMode.None: validates the DESTINATION address.
+        //   - ProxyMode.Explicit when !AllowPrivateProxy: validates the PROXY
+        //     address (which is what we connect to in this mode) — closes the
+        //     DNS rebinding window the construction-time check leaves open.
+        //     (Final-review F3.)
+        //   - ProxyMode.System: bypassed (the OS chooses the proxy and may
+        //     resolve through its own paths; out of our control).
+        //   - ProxyMode.Explicit with --allow-private-proxy: bypassed
+        //     (the user explicitly opted in to private proxies).
+        bool useConnectCallback =
+            options.ProxyMode == ProxyMode.None ||
+            (options.ProxyMode == ProxyMode.Explicit && !options.AllowPrivateProxy);
+        if (useConnectCallback)
         {
             bool allowLoopback = options.AllowLoopbackForTesting;
             handler.ConnectCallback = async (ctx, ctk) =>
@@ -312,6 +337,7 @@ public static class JwksClient
                 // (peer offered no cert) — those are authenticity guarantees,
                 // not trust-anchor questions. A cert signed by the supplied CA
                 // for attacker.example would otherwise authenticate any host.
+                // (Final-review B1.)
                 if ((errors & SslPolicyErrors.RemoteCertificateNotAvailable) != 0) return false;
                 if ((errors & SslPolicyErrors.RemoteCertificateNameMismatch) != 0) return false;
 
@@ -319,6 +345,11 @@ public static class JwksClient
                 customChain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
                 customChain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
                 customChain.ChainPolicy.CustomTrustStore.AddRange(trustedRoots);
+                // Require Server Authentication EKU. Without this, a cert
+                // issued by the trusted CA for code-signing or client-auth
+                // could authenticate a JWKS server. (Final-review F1, raised
+                // after the first fix-of-fixes pass.)
+                customChain.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.1"));
                 // Also build any intermediates supplied in the chain into ExtraStore.
                 if (chain is not null)
                 {
@@ -332,14 +363,39 @@ public static class JwksClient
         return handler;
     }
 
+    /// <summary>Maximum size of a PEM CA bundle supplied to <c>--ca-bundle</c>.</summary>
+    private const int MaxCaBundleBytes = 256 * 1024;
+
     private static X509Certificate2Collection LoadPemCertificateCollection(string path)
     {
+        // Bounded read so a giant PEM file can't cause managed OOM before
+        // ImportFromPem parses it. (Final-review F5.)
+        if (!File.Exists(path))
+            throw new InvalidDataException($"CA bundle '{path}' not found.");
+
         string pem;
-        try { pem = File.ReadAllText(path); }
+        try
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
+                bufferSize: 4096, useAsync: false);
+            byte[] buf = new byte[MaxCaBundleBytes + 1];
+            int total = 0;
+            int n;
+            while ((n = fs.Read(buf, total, buf.Length - total)) > 0)
+            {
+                total += n;
+                if (total > MaxCaBundleBytes)
+                    throw new InvalidDataException(
+                        $"CA bundle '{path}' exceeds maximum of {MaxCaBundleBytes:N0} bytes.");
+            }
+            pem = System.Text.Encoding.UTF8.GetString(buf, 0, total);
+        }
+        catch (InvalidDataException) { throw; }
         catch (Exception ex)
         {
             throw new InvalidDataException($"Could not read CA bundle '{path}': {ex.Message}", ex);
         }
+
         var coll = new X509Certificate2Collection();
         try { coll.ImportFromPem(pem); }
         catch (Exception ex)
