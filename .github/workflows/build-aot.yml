@@ -171,6 +171,48 @@ jobs:
         # 10.x release of ICSharpCode/ILSpy.
         run: dotnet tool install -g ilspycmd --version 10.1.0.8386
 
+      - name: Locate dumpbin (Windows only)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        # The [B] layer of Verify-OfflineGuarantee.ps1 invokes `dumpbin`
+        # to inspect the AOT exe's native imports. dumpbin ships with
+        # MSVC but is NOT on PATH by default on either windows-latest
+        # or windows-11-arm; we have to locate it via vswhere and add
+        # the directory to GITHUB_PATH for the next step. Linux/macOS
+        # use objdump/otool which are always on PATH so this step is
+        # skipped there.
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) {
+            Write-Error "vswhere.exe not found at $vswhere"
+            exit 1
+          }
+          $vsInstall = & $vswhere -latest -property installationPath
+          if (-not $vsInstall) {
+            Write-Error "No Visual Studio installation found by vswhere."
+            exit 1
+          }
+          # Prefer an architecture-native dumpbin (HostX64\x64 on x64,
+          # HostARM64\arm64 on arm64). Cross-host variants work too but
+          # native is faster and more compatible. Fall back to ANY
+          # dumpbin so a future MSVC layout change doesn't silently
+          # break the verifier.
+          $hostPattern = if ($env:RUNNER_ARCH -eq 'ARM64') {
+              'HostARM64(\\|/)arm64'
+          } else {
+              'Host[xX]64(\\|/)x64'
+          }
+          $candidates = Get-ChildItem -Path "$vsInstall\VC\Tools\MSVC" `
+              -Recurse -Filter 'dumpbin.exe' -ErrorAction SilentlyContinue
+          $dumpbin = $candidates | Where-Object { $_.FullName -match $hostPattern } | Select-Object -First 1
+          if (-not $dumpbin) { $dumpbin = $candidates | Select-Object -First 1 }
+          if (-not $dumpbin) {
+            Write-Error "dumpbin.exe not found under $vsInstall\VC\Tools\MSVC"
+            exit 1
+          }
+          Write-Host "Found dumpbin: $($dumpbin.FullName)"
+          Add-Content -Path $env:GITHUB_PATH -Value $dumpbin.Directory.FullName
+
       - name: Verify offline guarantee (jwtdecode)
         shell: pwsh
         run: |
