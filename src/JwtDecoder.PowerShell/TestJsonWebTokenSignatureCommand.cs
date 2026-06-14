@@ -39,7 +39,8 @@ public sealed class TestJsonWebTokenSignatureCommand : PSCmdlet
     [Parameter(Mandatory = true, ParameterSetName = ParamSetSecret)]
     public SecureString? Secret { get; set; }
 
-    [Parameter(Mandatory = true, ParameterSetName = ParamSetPublicKey)]
+    [Parameter(Mandatory = true, ParameterSetName = ParamSetPublicKey,
+        ValueFromPipelineByPropertyName = true)]
     public AsymmetricAlgorithm? PublicKey { get; set; }
 
     protected override void ProcessRecord()

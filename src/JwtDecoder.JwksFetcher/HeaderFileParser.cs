@@ -1,6 +1,4 @@
-using JwtDecoder.JwksFetcher;
-
-namespace JwksFetch;
+namespace JwtDecoder.JwksFetcher;
 
 /// <summary>
 /// Parses <c>--header-file</c> contents into an immutable list of HTTP header
@@ -12,10 +10,10 @@ namespace JwksFetch;
 /// non-whitespace character is <c>#</c> are skipped (comment convention).
 /// Names are RFC 7230 tokens; values may contain spaces but never CR/LF/NUL.
 /// Dangerous header names (hop-by-hop / auth / routing) are refused — the
-/// underlying <see cref="JwksClient"/> also refuses them, but the CLI catches
-/// them earlier so the user gets a precise error message.
+/// underlying <see cref="JwksClient"/> also refuses them, but the helper catches
+/// them earlier so callers can produce a precise error message.
 /// </remarks>
-internal static class HeaderFileParser
+public static class HeaderFileParser
 {
     /// <summary>Maximum size of a <c>--header-file</c> input.</summary>
     public const int MaxHeaderFileBytes = 8 * 1024;

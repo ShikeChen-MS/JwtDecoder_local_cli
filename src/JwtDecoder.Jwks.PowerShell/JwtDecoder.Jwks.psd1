@@ -14,7 +14,9 @@
     DotNetFrameworkVersion = ''
 
     # Exports (populated as cmdlets are added in Phase 5)
-    CmdletsToExport   = @()
+    CmdletsToExport   = @(
+        'Get-JsonWebKey'
+    )
     FunctionsToExport = @()
     VariablesToExport = @()
     AliasesToExport   = @()

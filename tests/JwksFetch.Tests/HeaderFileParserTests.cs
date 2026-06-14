@@ -1,3 +1,4 @@
+using JwtDecoder.JwksFetcher;
 using Xunit;
 
 namespace JwksFetch.Tests;

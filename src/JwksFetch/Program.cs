@@ -328,7 +328,7 @@ internal static class Program
 
         IReadOnlyList<(string Name, string Value)>? extra = null;
         if (opts.HeaderFile is not null)
-            extra = HeaderFileParser.ParseFile(opts.HeaderFile);
+            extra = JwtDecoder.JwksFetcher.HeaderFileParser.ParseFile(opts.HeaderFile);
 
         return new FetcherOptions
         {
