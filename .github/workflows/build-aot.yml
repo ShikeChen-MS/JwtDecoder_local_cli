@@ -12,9 +12,19 @@ on:
           - Release
           - Debug
   # Run on every push to master so a regression never sits unbuilt.
+  # paths-ignore skips runs when a push contains ONLY documentation
+  # changes — Markdown files and the LICENSE. Any file outside this
+  # list (source, tests, workflows, project files, .gitignore, etc.)
+  # still triggers a full build so we don't accidentally let a code
+  # change merge unbuilt. If the next push reverts to a code change,
+  # the next scheduled run also re-exercises the full pipeline within
+  # 20 days at the latest.
   push:
     branches:
       - master
+    paths-ignore:
+      - '**/*.md'
+      - 'LICENSE'
   # Periodic refresh: runs at 06:00 UTC on the 1st and 21st of every
   # month. Worst-case gap between runs is exactly 20 days (day 1 to
   # day 21 within the same month), so the build is exercised at most
