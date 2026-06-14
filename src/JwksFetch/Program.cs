@@ -160,7 +160,7 @@ internal static class Program
         }
         catch (System.Net.Http.HttpRequestException ex)
         {
-            stderr.WriteLine($"Network error: {SanitizeMessage(ex.Message)}");
+            stderr.WriteLine($"Network error: {FormatExceptionChain(ex)}");
             return 4;
         }
         catch (TaskCanceledException)
@@ -240,7 +240,7 @@ internal static class Program
               or System.Security.Authentication.AuthenticationException
               or System.Net.Sockets.SocketException)
         {
-            stderr.WriteLine($"Network error: {SanitizeMessage(ex.Message)}");
+            stderr.WriteLine($"Network error: {FormatExceptionChain(ex)}");
             return 4;
         }
         if (ex is InvalidDataException ide) return MapDataExceptionToExit(ide, stderr);
@@ -251,8 +251,36 @@ internal static class Program
             stderr.WriteLine($"Error: {SanitizeMessage(ex.Message)}");
             return 2;
         }
-        stderr.WriteLine($"Unexpected error: {SanitizeMessage(ex.Message)}");
+        stderr.WriteLine($"Unexpected error: {FormatExceptionChain(ex)}");
         return 1;
+    }
+
+    /// <summary>
+    /// Surface the inner-exception chain so callers see WHY a network call
+    /// failed, not just "see inner exception". The outer
+    /// HttpRequestException message is often "The SSL connection could not
+    /// be established, see inner exception." — the inner usually carries
+    /// the actual cause (cert chain failure, name mismatch, socket reset,
+    /// etc.). Inner messages are CR/LF/NUL-sanitised and capped to a
+    /// reasonable depth to keep output predictable.
+    /// </summary>
+    private static string FormatExceptionChain(Exception ex)
+    {
+        const int maxDepth = 5;
+        var parts = new System.Text.StringBuilder();
+        parts.Append(SanitizeMessage(ex.Message));
+        var inner = ex.InnerException;
+        int depth = 0;
+        while (inner is not null && depth < maxDepth)
+        {
+            parts.Append(" -> ");
+            parts.Append(inner.GetType().Name);
+            parts.Append(": ");
+            parts.Append(SanitizeMessage(inner.Message));
+            inner = inner.InnerException;
+            depth++;
+        }
+        return parts.ToString();
     }
 
     private static byte[] ReadTokenBytes(JwksFetchOptions opts)

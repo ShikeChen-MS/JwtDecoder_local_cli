@@ -42,7 +42,28 @@ internal sealed class HttpsTestServer : IAsyncDisposable
         bool useCodeSigningEkuOnly = false)
     {
         using var rsa = RSA.Create(2048);
-        var req = new CertificateRequest("CN=" + (sanHost ?? "localhost"), rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+
+        // Use a unique CN per HttpsTestServer instance. The cross-host
+        // jwks_uri test runs two simultaneous servers and concatenates
+        // BOTH self-signed roots into one custom trust store. Linux
+        // OpenSSL's chain builder distinguishes candidate roots by
+        // subject DN; two roots with identical CN=localhost confuse the
+        // signature-verification path and a TLS handshake to either
+        // server can fail with "The SSL connection could not be
+        // established". Windows CryptoAPI and macOS SecurityFramework
+        // are lenient here, which is why this only surfaced on Linux.
+        // SAN remains the authoritative hostname matcher (RFC 6125 has
+        // deprecated CN-based hostname matching for over a decade).
+        string subjectCn = sanHost ?? ("jwks-test-" + Guid.NewGuid().ToString("N").Substring(0, 12));
+        var req = new CertificateRequest("CN=" + subjectCn, rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+
+        // SubjectKeyIdentifier helps OpenSSL match a cert to its trust-
+        // store entry even when subjects collide, by giving each cert
+        // a unique fingerprint derived from its public key. Adding this
+        // is also proper PKI hygiene — real-world CA certs always
+        // declare SKI.
+        req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, critical: false));
+
         var san = new SubjectAlternativeNameBuilder();
         if (sanHost is null)
         {
