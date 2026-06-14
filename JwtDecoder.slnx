@@ -1,11 +1,17 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/JwtDecoder.Core/JwtDecoder.Core.csproj" />
+    <Project Path="src/JwtDecoder.JwksFetcher/JwtDecoder.JwksFetcher.csproj" />
+    <Project Path="src/JwtDecoder.Jwks.PowerShell/JwtDecoder.Jwks.PowerShell.csproj" />
     <Project Path="src/JwtDecoder.PowerShell/JwtDecoder.PowerShell.csproj" />
     <Project Path="src/JwtDecoder/JwtDecoder.csproj" />
+    <Project Path="src/JwksFetch/JwksFetch.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/JwtDecoder.Core.Tests/JwtDecoder.Core.Tests.csproj" />
+    <Project Path="tests/JwtDecoder.JwksFetcher.Tests/JwtDecoder.JwksFetcher.Tests.csproj" />
+    <Project Path="tests/JwtDecoder.Jwks.PowerShell.Tests/JwtDecoder.Jwks.PowerShell.Tests.csproj" />
     <Project Path="tests/JwtDecoder.Tests/JwtDecoder.Tests.csproj" />
+    <Project Path="tests/JwksFetch.Tests/JwksFetch.Tests.csproj" />
   </Folder>
 </Solution>

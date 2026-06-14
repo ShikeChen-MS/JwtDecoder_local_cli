@@ -9,6 +9,7 @@ internal sealed class CliOptions
     public bool Detailed { get; init; }
     public bool Verify { get; init; }
     public string? KeyFile { get; init; }
+    public bool KeyFromStdin { get; init; }
     public string? Query { get; init; }
     public bool Raw { get; init; }
     public bool Help { get; init; }
@@ -86,13 +87,27 @@ internal static class Cli
         if (token is not null && tokenFile is not null)
             return (null, "Error: provide either a positional token OR --file, not both.");
         if (verify && keyFile is null)
-            return (null, "Error: --verify requires --key-file <path>.");
+            return (null, "Error: --verify requires --key-file <path> (use '-' to read the key from stdin).");
         if (keyFile is not null && !verify)
             return (null, "Error: --key-file is only meaningful with --verify.");
         if (query is not null && detailed)
             return (null, "Error: --query and --detailed cannot be combined.");
         if (raw && query is null)
             return (null, "Error: --raw is only meaningful with --query.");
+
+        // --key-file - reads the key from stdin. In that mode stdin is the key
+        // channel, so the token MUST come from a positional arg or --file.
+        bool keyFromStdin = keyFile == "-";
+        if (keyFromStdin)
+        {
+            if (token is null && tokenFile is null)
+                return (null,
+                    "Error: '--key-file -' reads the verification key from stdin, " +
+                    "so the JWT must be supplied as a positional argument or via --file " +
+                    "(stdin cannot carry both the token and the key).");
+            // Don't carry the literal "-" through as if it were a path.
+            keyFile = null;
+        }
 
         return (new CliOptions
         {
@@ -101,6 +116,7 @@ internal static class Cli
             Detailed = detailed,
             Verify = verify,
             KeyFile = keyFile,
+            KeyFromStdin = keyFromStdin,
             Query = query,
             Raw = raw,
             Help = help,
@@ -125,9 +141,11 @@ internal static class Cli
         w.WriteLine("                                             Bare names (e.g. \"sub\") default to payload.<name>.");
         w.WriteLine("                                             Output is JSON form by default; use --raw to unwrap strings.");
         w.WriteLine("      --raw                                  With --query, print string scalars unwrapped (no JSON quotes).");
-        w.WriteLine("      --verify                               Verify the signature (requires --key-file).");
+          w.WriteLine("      --verify                               Verify the signature (requires --key-file).");
         w.WriteLine("      --key-file <path>                      Path to the key file (HMAC raw secret or PEM PUBLIC key).");
-        w.WriteLine("      --file <path>                          Read the JWT from <path>.");
+          w.WriteLine("                                             Use '-' to read the key bytes from stdin (the token must");
+          w.WriteLine("                                             then come from --file or a positional argument).");
+          w.WriteLine("      --file <path>                          Read the JWT from <path>.");
         w.WriteLine("  -h, --help                                 Show this help.");
         w.WriteLine("  -v, --version                              Show version.");
         w.WriteLine();

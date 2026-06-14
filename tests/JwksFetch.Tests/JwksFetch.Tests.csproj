@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>JwksFetch.Tests</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Compile-linked from the JwksFetcher tests so the same Kestrel HTTPS
+         fixture is used by both projects (one source of truth). -->
+    <Compile Include="..\JwtDecoder.JwksFetcher.Tests\HttpsTestServer.cs" Link="Shared\HttpsTestServer.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Local HTTPS test server (Kestrel) for jwksfetch end-to-end tests. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- AdditionalProperties propagates the test-hook flag DOWN to the JwksFetch
+         project build that this reference triggers. Without it, MSBuild project
+         references do not pass through properties. The CLI assembly built by
+         `dotnet publish src/JwksFetch` from scratch does NOT see this property
+         and therefore compiles TestHooks.cs to nothing. (Final-review I6.) -->
+    <ProjectReference Include="..\..\src\JwksFetch\JwksFetch.csproj"
+                      AdditionalProperties="JwksFetchAllowTestHooks=true" />
+  </ItemGroup>
+
+</Project>

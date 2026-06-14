@@ -244,4 +244,67 @@ public class CliParseTests
         Assert.False(opts.Verify);
         Assert.Null(opts.Query);
     }
+
+    // -----------------------------------------------------------------
+    // --key-file -  (Phase 3: key from stdin)
+    // -----------------------------------------------------------------
+
+    [Fact]
+    public void KeyFile_dash_with_positional_token_sets_KeyFromStdin()
+    {
+        var (opts, err) = Cli.Parse(new[] { "eyJhbGciOi.payload.sig", "--verify", "--key-file", "-" });
+        Assert.Null(err);
+        Assert.True(opts!.KeyFromStdin);
+        Assert.True(opts.Verify);
+        Assert.Null(opts.KeyFile);                 // literal "-" is normalized away
+        Assert.Equal("eyJhbGciOi.payload.sig", opts.Token);
+    }
+
+    [Fact]
+    public void KeyFile_dash_with_token_file_sets_KeyFromStdin()
+    {
+        var (opts, err) = Cli.Parse(new[] { "--file", "token.jwt", "--verify", "--key-file", "-" });
+        Assert.Null(err);
+        Assert.True(opts!.KeyFromStdin);
+        Assert.Equal("token.jwt", opts.TokenFile);
+        Assert.Null(opts.KeyFile);
+    }
+
+    [Fact]
+    public void KeyFile_dash_without_any_token_source_is_error()
+    {
+        // No positional, no --file → stdin would be needed for the token, but
+        // stdin is reserved for the key when '-' is given.
+        var (opts, err) = Cli.Parse(new[] { "--verify", "--key-file", "-" });
+        Assert.Null(opts);
+        Assert.NotNull(err);
+        Assert.Contains("stdin", err!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void KeyFile_dash_without_verify_is_error()
+    {
+        // Existing rule: --key-file requires --verify.
+        var (opts, err) = Cli.Parse(new[] { "eyJabc.def.ghi", "--key-file", "-" });
+        Assert.Null(opts);
+        Assert.Contains("--verify", err!);
+    }
+
+    [Fact]
+    public void KeyFile_path_alone_still_sets_KeyFile_and_not_KeyFromStdin()
+    {
+        // Regression: the existing flow must remain unchanged.
+        var (opts, err) = Cli.Parse(new[] { "eyJabc.def.ghi", "--verify", "--key-file", "C:\\tmp\\hs256.txt" });
+        Assert.Null(err);
+        Assert.Equal("C:\\tmp\\hs256.txt", opts!.KeyFile);
+        Assert.False(opts.KeyFromStdin);
+    }
+
+    [Fact]
+    public void KeyFile_specified_twice_is_error_even_if_one_is_dash()
+    {
+        var (_, err) = Cli.Parse(new[] { "eyJabc.def.ghi", "--verify", "--key-file", "p1", "--key-file", "-" });
+        Assert.NotNull(err);
+        Assert.Contains("--key-file", err!);
+    }
 }

@@ -7,10 +7,14 @@ name: Publish release (PSGallery + NuGet + GitHub Release)
 #   2. Build + functional-test the PowerShell module.
 #   3. Build + functional-test the AOT CLI on all 5 supported platforms
 #      (Native AOT, with Sigstore build-provenance attestations).
-#   4. Publish the module to PowerShell Gallery (environment-gated;
-#      requires manual approval; dry-run by default).
-#   5. Pack + publish JwtDecoder.Core to nuget.org and GitHub Packages
-#      (environment-gated; dry-run by default).
+#   4. Publish the module to PowerShell Gallery — both modules:
+#      `JwtDecoder` (offline) and `JwtDecoder.Jwks` (network-capable
+#      companion). Environment-gated; requires manual approval; dry-run
+#      by default.
+#   5. Pack + publish JwtDecoder.Core AND JwtDecoder.JwksFetcher to
+#      nuget.org and GitHub Packages (environment-gated; dry-run by
+#      default). JwksFetcher carries an exact-pin dependency on Core,
+#      so both packages release as a matched pair from the same tag.
 #   6. Create a GitHub Release at the tag with all 5 CLI binaries
 #      attached as assets (skipped entirely on dry runs).
 #
@@ -39,9 +43,11 @@ permissions:
   contents: read
 
 env:
-  PROJECT_CORE:   src/JwtDecoder.Core/JwtDecoder.Core.csproj
-  PROJECT_MODULE: src/JwtDecoder.PowerShell/JwtDecoder.PowerShell.csproj
-  PROJECT_CLI:    src/JwtDecoder/JwtDecoder.csproj
+  PROJECT_CORE:        src/JwtDecoder.Core/JwtDecoder.Core.csproj
+  PROJECT_MODULE:      src/JwtDecoder.PowerShell/JwtDecoder.PowerShell.csproj
+  PROJECT_JWKS_MODULE: src/JwtDecoder.Jwks.PowerShell/JwtDecoder.Jwks.PowerShell.csproj
+  PROJECT_JWKSFETCHER: src/JwtDecoder.JwksFetcher/JwtDecoder.JwksFetcher.csproj
+  PROJECT_CLI:         src/JwtDecoder/JwtDecoder.csproj
 
 jobs:
   # ---------------------------------------------------------------------
@@ -190,6 +196,100 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------
+  # Job 2b: build + functionally test the JwtDecoder.Jwks PowerShell
+  # module (the network-capable companion). Same gating, same staging
+  # pattern, separate artifact name so the offline module's stage isn't
+  # contaminated.
+  # ---------------------------------------------------------------------
+  validate-jwks-module:
+    name: Build + test JwtDecoder.Jwks PowerShell module
+    needs: prep
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Setup .NET SDKs (8 for PS module + Core, 10 for tests)
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Run unit tests (dotnet test)
+        shell: pwsh
+        run: dotnet test -c Release --logger "console;verbosity=normal"
+
+      - name: Restore
+        shell: pwsh
+        run: dotnet restore "$env:PROJECT_JWKS_MODULE"
+
+      - name: Publish module (dotnet)
+        shell: pwsh
+        run: dotnet publish "$env:PROJECT_JWKS_MODULE" -c Release --no-restore
+
+      - name: Stage module + rewrite ModuleVersion to the tag's version
+        shell: pwsh
+        run: |
+          $publishDir = "src/JwtDecoder.Jwks.PowerShell/bin/Release/net8.0/publish"
+          $version    = '${{ needs.prep.outputs.version }}'
+          $stageRoot  = Join-Path $env:RUNNER_TEMP 'publish-stage-jwks'
+          $moduleDir  = Join-Path $stageRoot 'JwtDecoder.Jwks'
+
+          if (Test-Path $stageRoot) { Remove-Item $stageRoot -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $moduleDir | Out-Null
+
+          Get-ChildItem -LiteralPath $publishDir -File |
+            Where-Object { $_.Extension -notin @('.pdb', '.xml') } |
+            ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $moduleDir $_.Name) -Force }
+
+          $manifestPath = Join-Path $moduleDir 'JwtDecoder.Jwks.psd1'
+          $content      = Get-Content -Raw -LiteralPath $manifestPath
+          $pattern      = "(?m)^(\s*ModuleVersion\s*=\s*)'[^']+'"
+          if ($content -notmatch $pattern) {
+            throw "ModuleVersion line not found in $manifestPath"
+          }
+          $updated = [regex]::Replace($content, $pattern, ('$1' + "'" + $version + "'"))
+          Set-Content -LiteralPath $manifestPath -Value $updated -NoNewline
+
+          $m = Test-ModuleManifest -Path $manifestPath
+          if ($m.Version -ne [Version]$version) {
+            throw "Manifest version $($m.Version) does not match tag version $version after rewrite."
+          }
+          Write-Host "Staged JwtDecoder.Jwks $version at: $moduleDir"
+          Get-ChildItem $moduleDir | Format-Table Name, Length
+
+      - name: Functional tests against the staged module
+        shell: pwsh
+        run: |
+          $manifestPath = Join-Path $env:RUNNER_TEMP 'publish-stage-jwks' 'JwtDecoder.Jwks' 'JwtDecoder.Jwks.psd1'
+          ./tools/Test-JwtDecoderJwksModule.ps1 -ModulePath $manifestPath
+
+      - name: Pre-check PSGallery — refuse to re-publish an existing version
+        shell: pwsh
+        run: |
+          $version = '${{ needs.prep.outputs.version }}'
+          $found = $null
+          try {
+            $found = Find-PSResource -Name JwtDecoder.Jwks -Version $version -Repository PSGallery -ErrorAction SilentlyContinue 2>$null
+          } catch { }
+          if ($found) {
+            throw "JwtDecoder.Jwks $version is already published to PSGallery. Bump the tag and try again."
+          }
+          Write-Host "PSGallery does not yet have JwtDecoder.Jwks $version. Clear to publish."
+
+      - name: Upload staged module for the publish job
+        uses: actions/upload-artifact@v4
+        with:
+          name: publish-stage-jwks
+          path: ${{ runner.temp }}/publish-stage-jwks
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------
   # Job 3: build + functionally test the AOT CLI on every platform, name
   # each binary for release, attest its provenance, upload as an
   # artifact. Mirrors build-aot.yml but adds the release-friendly rename
@@ -318,6 +418,80 @@ jobs:
         with:
           name: cli-release-${{ matrix.rid }}
           path: ${{ steps.rename.outputs.assetPath }}
+          if-no-files-found: error
+          retention-days: 7
+
+      # --------------------------------------------------------------
+      # jwksfetch: the network-capable companion CLI. Same matrix,
+      # same gating - the `dotnet test` step above must pass before we
+      # get here. Renamed for release, attested, uploaded under
+      # cli-release-jwksfetch-<rid> so the existing
+      # `pattern: cli-release-*` selector in the create-release job
+      # picks it up alongside jwtdecode.
+      # --------------------------------------------------------------
+
+      - name: Restore (jwksfetch)
+        shell: pwsh
+        run: dotnet restore "$env:PROJECT_JWKSFETCHER" -r ${{ matrix.rid }}
+
+      - name: Publish jwksfetch (Native AOT)
+        shell: pwsh
+        run: >
+          dotnet publish "$env:PROJECT_JWKSFETCHER"
+          -c Release
+          -r ${{ matrix.rid }}
+          --no-restore
+
+      - name: Locate jwksfetch binary
+        id: locate_jwksfetch
+        shell: pwsh
+        run: |
+          $publishDir = "src/JwksFetch/bin/Release/net10.0/${{ matrix.rid }}/publish"
+          $exe = if ('${{ matrix.exe }}'.EndsWith('.exe')) { 'jwksfetch.exe' } else { 'jwksfetch' }
+          $bin = Join-Path $publishDir $exe
+          if (-not (Test-Path $bin)) {
+            Write-Error "Expected output not found: $bin"
+            if (Test-Path $publishDir) { Get-ChildItem -Recurse $publishDir | Format-Table FullName, Length }
+            exit 1
+          }
+          if ($IsLinux -or $IsMacOS) { chmod +x $bin }
+          $sizeMB = [math]::Round((Get-Item $bin).Length / 1MB, 2)
+          Write-Host "Built $exe ($sizeMB MB) for ${{ matrix.rid }}"
+          "binPath=$bin" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Functional tests (jwksfetch)
+        shell: pwsh
+        run: >
+          ./tools/Test-JwksFetchBuild.ps1
+          -BinPath "${{ steps.locate_jwksfetch.outputs.binPath }}"
+          -JwtDecodeBinPath "${{ steps.locate.outputs.binPath }}"
+
+      - name: Rename jwksfetch to release-friendly asset name
+        id: rename_jwksfetch
+        shell: pwsh
+        run: |
+          $version  = '${{ needs.prep.outputs.version }}'
+          $src      = '${{ steps.locate_jwksfetch.outputs.binPath }}'
+          $hasExt   = '${{ matrix.exe }}'.EndsWith('.exe')
+          $ext      = if ($hasExt) { '.exe' } else { '' }
+          $assetName = "jwksfetch-$version-${{ matrix.rid }}$ext"
+          $assetPath = Join-Path $env:RUNNER_TEMP $assetName
+          Copy-Item -LiteralPath $src -Destination $assetPath -Force
+          if ($IsLinux -or $IsMacOS) { chmod +x $assetPath }
+          Write-Host "Asset: $assetPath"
+          "assetPath=$assetPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "assetName=$assetName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Attest build provenance (jwksfetch)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.rename_jwksfetch.outputs.assetPath }}
+
+      - name: Upload jwksfetch CLI asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-release-jwksfetch-${{ matrix.rid }}
+          path: ${{ steps.rename_jwksfetch.outputs.assetPath }}
           if-no-files-found: error
           retention-days: 7
 
@@ -451,14 +625,121 @@ jobs:
             ${{ runner.temp }}/stage/JwtDecoder/JwtDecoder.Core.dll
 
   # ---------------------------------------------------------------------
-  # Job 5: pack + publish JwtDecoder.Core to nuget.org AND GitHub
-  # Packages. Gated by the same `powershell-gallery` environment that
-  # protects the PSGallery key, so a single approval covers both feeds.
-  # NuGet pushes use --skip-duplicate so retries after a partial failure
-  # don't re-publish the same .nupkg version.
+  # Job 4b: publish JwtDecoder.Jwks to PSGallery. Same `powershell-gallery`
+  # environment gate / dry-run flag / API-key handling as publish-module.
+  #
+  # PSGallery API-key prerequisite (manual one-time setup):
+  #   The POWERSHELL_GALLERY_API_KEY environment secret used by both
+  #   PSGallery publish jobs is account-scoped, so the same key works
+  #   for JwtDecoder AND JwtDecoder.Jwks once the publisher has uploaded
+  #   the first version of each module. Rotate keys per the gallery's
+  #   normal rotation policy.
+  # ---------------------------------------------------------------------
+  publish-jwks-module:
+    name: Publish JwtDecoder.Jwks module to PowerShell Gallery
+    needs: [prep, validate-jwks-module]
+    runs-on: windows-latest
+    environment: powershell-gallery
+
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Download staged module
+        uses: actions/download-artifact@v4
+        with:
+          name: publish-stage-jwks
+          path: ${{ runner.temp }}/stage-jwks
+
+      - name: Initialise PSResourceGet repository store
+        shell: pwsh
+        run: |
+          $storeDir = Join-Path $env:LOCALAPPDATA 'PSResourceGet'
+          New-Item -ItemType Directory -Path $storeDir -Force | Out-Null
+          Get-PSResourceRepository | Out-Null
+          $psg = Get-PSResourceRepository -Name PSGallery -ErrorAction SilentlyContinue
+          if (-not $psg) {
+            Register-PSResourceRepository -PSGallery -Trusted
+          } elseif (-not $psg.Trusted) {
+            Set-PSResourceRepository -Name PSGallery -Trusted
+          }
+
+      - name: Publish-PSResource (dry-run or live)
+        shell: pwsh
+        env:
+          PSG_KEY: ${{ secrets.POWERSHELL_GALLERY_API_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:PSG_KEY)) {
+            throw "POWERSHELL_GALLERY_API_KEY secret is not set on the 'powershell-gallery' environment."
+          }
+          $modulePath   = Join-Path '${{ runner.temp }}' 'stage-jwks' 'JwtDecoder.Jwks'
+          $manifestPath = Join-Path $modulePath 'JwtDecoder.Jwks.psd1'
+          if (-not (Test-Path $manifestPath)) {
+            throw "Staged manifest not found at $manifestPath"
+          }
+
+          $version = '${{ needs.prep.outputs.version }}'
+          $m = Test-ModuleManifest -Path $manifestPath
+          $manifestVersion = "$($m.Version)"
+          Write-Host "Tag-derived version : '$version'"
+          Write-Host "Manifest ModuleVersion: '$manifestVersion'"
+
+          if ($manifestVersion -match '^[vV]') { throw "ModuleVersion starts with 'v'." }
+          if ($manifestVersion -match '\s')    { throw "ModuleVersion contains whitespace." }
+          if ($manifestVersion -ne $version) {
+            throw "Manifest version '$manifestVersion' != tag-derived '$version'."
+          }
+
+          if ('${{ inputs.dry_run }}' -eq 'true') {
+            Write-Host "DRY RUN: Publish-PSResource -WhatIf"
+            Publish-PSResource -Path $modulePath -Repository PSGallery -ApiKey $env:PSG_KEY -WhatIf -Verbose
+          } else {
+            Publish-PSResource -Path $modulePath -Repository PSGallery -ApiKey $env:PSG_KEY -Verbose
+            Write-Host "Published JwtDecoder.Jwks $version"
+            Write-Host "URL: https://www.powershellgallery.com/packages/JwtDecoder.Jwks/$version"
+          }
+
+      - name: Attest build provenance
+        if: ${{ success() && !inputs.dry_run }}
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            ${{ runner.temp }}/stage-jwks/JwtDecoder.Jwks/JwtDecoder.Jwks.psd1
+            ${{ runner.temp }}/stage-jwks/JwtDecoder.Jwks/JwtDecoder.Jwks.PowerShell.dll
+            ${{ runner.temp }}/stage-jwks/JwtDecoder.Jwks/JwtDecoder.JwksFetcher.dll
+            ${{ runner.temp }}/stage-jwks/JwtDecoder.Jwks/JwtDecoder.Core.dll
+
+  # ---------------------------------------------------------------------
+  # Job 5: pack + publish JwtDecoder.Core AND JwtDecoder.JwksFetcher to
+  # nuget.org AND GitHub Packages. Gated by the same `powershell-gallery`
+  # environment that protects the PSGallery key, so a single approval
+  # covers both feeds.
+  #
+  # Two-package release strategy:
+  #   - Both .csproj files are packed with the same tag-derived version.
+  #   - JwtDecoder.JwksFetcher's MSBuild target (ExactPinProjectReferenceVersions)
+  #     emits an EXACT-PIN dependency `[X.Y.Z]` on JwtDecoder.Core so the
+  #     two packages can only be consumed as a matched pair.
+  #   - Push order is deterministic: Core first, then JwksFetcher.
+  #   - Both `dotnet nuget push` calls use --skip-duplicate so retries
+  #     after a partial failure don't re-publish the same .nupkg version.
+  #
+  # Trusted Publishing prerequisites on nuget.org (manual one-time setup):
+  #   For JwtDecoder.Core           — Trusted Publishing policy matching:
+  #     Repository owner : ShikeChen-MS
+  #     Repository       : JwtDecoder_local_cli
+  #     Workflow file    : publish-pwsh-module.yml
+  #     Environment      : powershell-gallery   (optional)
+  #   For JwtDecoder.JwksFetcher    — IDENTICAL policy, registered separately
+  #     on the JwtDecoder.JwksFetcher package settings page. (Until this
+  #     policy is registered, the first publish of JwtDecoder.JwksFetcher
+  #     fails at the `dotnet nuget push` step; the workflow logs the
+  #     error and the dry-run path remains usable in the meantime.)
   # ---------------------------------------------------------------------
   publish-nuget:
-    name: Publish JwtDecoder.Core to nuget.org + GitHub Packages
+    name: Publish JwtDecoder.Core + JwtDecoder.JwksFetcher to nuget.org + GitHub Packages
     needs: [prep, validate-module, build-cli]
     runs-on: ubuntu-latest
     environment: powershell-gallery
@@ -480,7 +761,7 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: dotnet pack (version overridden from tag)
+      - name: dotnet pack JwtDecoder.Core + JwtDecoder.JwksFetcher (version from tag)
         shell: bash
         run: |
           version='${{ needs.prep.outputs.version }}'
@@ -489,14 +770,20 @@ jobs:
             -c Release \
             -p:Version="$version" \
             --output ./nupkgs
+          echo "Packing JwtDecoder.JwksFetcher $version"
+          dotnet pack "$PROJECT_JWKSFETCHER" \
+            -c Release \
+            -p:Version="$version" \
+            --output ./nupkgs
           echo "--- nupkgs ---"
           ls -la ./nupkgs/
 
-      # Self-test: build a throwaway console app that consumes the
-      # freshly-packed .nupkg and exercises the JwtTools surface, so a
-      # broken package never reaches the public feeds. Runs in dry-run
-      # too -- the more validation, the better.
-      - name: Self-test the .nupkg
+      # Self-test BOTH packages: build a throwaway console app that pulls
+      # JwtDecoder.JwksFetcher from the local feed and confirms it
+      # transitively resolves JwtDecoder.Core at the EXACT-PIN version.
+      # A broken package or a misconfigured exact-pin never reaches the
+      # public feeds. Runs in dry-run too — the more validation, the better.
+      - name: Self-test both .nupkgs (transitive resolution + exact-pin verification)
         shell: bash
         run: |
           set -euo pipefail
@@ -516,12 +803,48 @@ jobs:
           </configuration>
           EOF
 
-          dotnet add package JwtDecoder.Core --version "$version"
+          # Adding JwksFetcher must transitively pull Core at EXACTLY $version.
+          dotnet add package JwtDecoder.JwksFetcher --version "$version"
 
+          # Inspect the resolved assets to confirm Core was indeed resolved at
+          # the exact-pin version — not some older floating version from nuget.org.
+          dotnet restore --verbosity quiet
+          resolved_core=$(grep -oE '"JwtDecoder\.Core/[0-9.]+"' obj/project.assets.json | head -1 | tr -d '"')
+          expected_core="JwtDecoder.Core/$version"
+          if [ "$resolved_core" != "$expected_core" ]; then
+            echo "::error::Exact-pin violation: resolved '$resolved_core' but expected '$expected_core'."
+            echo "Inspect JwtDecoder.JwksFetcher.csproj's ExactPinProjectReferenceVersions target."
+            exit 1
+          fi
+          echo "OK: $resolved_core resolved via JwtDecoder.JwksFetcher transitive dependency."
+
+          # Round-6 #3 — resolved-version match alone proves nothing: at first
+          # release no NEWER Core version exists, so a floating `[X.Y.Z, )`
+          # range would resolve identically to the exact-pin `[X.Y.Z]`. The
+          # only test that proves the EXACT-PIN SYNTAX is intact is to read
+          # the .nuspec inside the produced .nupkg directly. If MSBuild's
+          # ExactPinProjectReferenceVersions target ever breaks, the resolved
+          # check would still pass on this very release but a later release
+          # could silently pick up a malicious newer Core.
+          unzip -o "$GITHUB_WORKSPACE/nupkgs/JwtDecoder.JwksFetcher.${version}.nupkg" \
+            JwtDecoder.JwksFetcher.nuspec -d /tmp/nupkg-inspect
+          pin_pattern="<dependency id=\"JwtDecoder.Core\" version=\"[${version}]\""
+          if ! grep -qF "$pin_pattern" /tmp/nupkg-inspect/JwtDecoder.JwksFetcher.nuspec; then
+            echo "::error::nuspec is missing exact-pin '[${version}]' on JwtDecoder.Core."
+            echo "Expected substring: $pin_pattern"
+            echo "Actual <dependencies> block:"
+            sed -n '/<dependencies>/,/<\/dependencies>/p' /tmp/nupkg-inspect/JwtDecoder.JwksFetcher.nuspec
+            exit 1
+          fi
+          echo "OK: .nuspec contains exact-pin '[${version}]' on JwtDecoder.Core."
+
+          # Compile against the public API of both packages.
           cat > Program.cs <<'EOF'
           using JwtDecoder.Core;
+          using JwtDecoder.JwksFetcher;
           using System.Text;
 
+          // --- Core surface still works as in the v1 self-test. ---
           var token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
           var secret = "your-256-bit-secret";
 
@@ -536,8 +859,20 @@ jobs:
           Console.WriteLine($"verify(correct).Verified = {ok.Verified}");
           Console.WriteLine($"verify(wrong).Verified   = {bad.Verified}");
 
-          var (j2, o2) = JwtTools.DecodeAndVerifyHmac(token, Encoding.UTF8.GetBytes(secret));
-          using (j2) Console.WriteLine($"DecodeAndVerifyHmac: alg={j2.Algorithm}, verified={o2.Verified}");
+          // --- JwksFetcher surface: build a minimal JWKS in-memory and roundtrip a key. ---
+          using var rsa = System.Security.Cryptography.RSA.Create(2048);
+          var p = rsa.ExportParameters(false);
+          static string B64Url(byte[] bytes)
+          {
+              var s = Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+              return s;
+          }
+          var jwksJson = "{\"keys\":[{\"kty\":\"RSA\",\"kid\":\"k1\",\"alg\":\"RS256\",\"n\":\"" + B64Url(p.Modulus!) + "\",\"e\":\"" + B64Url(p.Exponent!) + "\"}]}";
+          var keys = JwksDocument.Parse(Encoding.UTF8.GetBytes(jwksJson));
+          var sel  = JwkSelector.Select(keys, "RS256", "k1");
+          var pem  = JwkToPem.ToPublicKeyPem(sel.Selected);
+          if (!pem.Contains("BEGIN PUBLIC KEY")) { Console.Error.WriteLine("JwksFetcher PEM round-trip FAILED"); Environment.Exit(1); }
+          Console.WriteLine("JwksFetcher PEM round-trip: OK");
 
           if (!ok.Verified || bad.Verified) Environment.Exit(1);
           EOF
@@ -545,7 +880,7 @@ jobs:
           dotnet run --no-launch-profile
           popd >/dev/null
           rm -rf "$work"
-          echo "Self-test passed."
+          echo "Self-test passed for both packages."
 
       # Attest the .nupkg only on real publishes, so the attestation
       # log isn't polluted with dry-run entries.
@@ -574,35 +909,89 @@ jobs:
         with:
           user: ${{ vars.NUGET_USER }}
 
-      - name: Push to nuget.org (trusted publishing via OIDC)
+      - name: Push to nuget.org (Core first, then JwksFetcher; trusted publishing via OIDC)
         if: ${{ !inputs.dry_run }}
         env:
           NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
         shell: bash
         run: |
+          set -euo pipefail
           if [ -z "${NUGET_API_KEY:-}" ]; then
             echo "::error::NuGet/login did not produce a short-lived API key. Check that nuget.org's trusted publishing policy for JwtDecoder.Core matches this repo + workflow file (publish-pwsh-module.yml)."
             exit 1
           fi
-          # Pushing the .nupkg also pushes the matching .snupkg as a
-          # side-effect, so we glob both safely.
-          dotnet nuget push './nupkgs/*.nupkg' \
+          version='${{ needs.prep.outputs.version }}'
+          # Order matters. JwtDecoder.JwksFetcher's manifest references
+          # JwtDecoder.Core at [version] (exact pin), so Core MUST be
+          # retrievable from nuget.org by the time anyone resolves the
+          # pair. Pushing serially with --skip-duplicate keeps retries
+          # safe and indempotent.
+          dotnet nuget push "./nupkgs/JwtDecoder.Core.$version.nupkg" \
+            --source https://api.nuget.org/v3/index.json \
+            --api-key "$NUGET_API_KEY" \
+            --skip-duplicate
+          dotnet nuget push "./nupkgs/JwtDecoder.JwksFetcher.$version.nupkg" \
             --source https://api.nuget.org/v3/index.json \
             --api-key "$NUGET_API_KEY" \
             --skip-duplicate
 
-      - name: Push to GitHub Packages
+      - name: Push to GitHub Packages (Core first, then JwksFetcher)
         if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
+          set -euo pipefail
+          version='${{ needs.prep.outputs.version }}'
           # GitHub Packages accepts the workflow's GITHUB_TOKEN as the
           # API key (packages: write permission is granted above).
-          dotnet nuget push './nupkgs/*.nupkg' \
+          dotnet nuget push "./nupkgs/JwtDecoder.Core.$version.nupkg" \
             --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" \
             --api-key "$GH_TOKEN" \
             --skip-duplicate
+          dotnet nuget push "./nupkgs/JwtDecoder.JwksFetcher.$version.nupkg" \
+            --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" \
+            --api-key "$GH_TOKEN" \
+            --skip-duplicate
+
+      # Confirm the just-pushed pair is RESOLVABLE from a fresh consumer
+      # against nuget.org with an empty packages cache. Defends against
+      # the round-2 review's "delayed indexing" failure mode where a
+      # release ships but transient nuget.org indexing makes the new
+      # JwksFetcher unable to find its just-pushed Core dependency.
+      - name: Lock-step release verification (fresh consumer restore)
+        if: ${{ !inputs.dry_run }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ needs.prep.outputs.version }}'
+          work=$(mktemp -d)
+          cache=$(mktemp -d)
+          pushd "$work" >/dev/null
+          dotnet new console --output . --framework net8.0 --no-restore >/dev/null
+          cat > nuget.config <<EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <configuration>
+            <packageSources>
+              <clear />
+              <add key="nuget" value="https://api.nuget.org/v3/index.json" />
+            </packageSources>
+          </configuration>
+          EOF
+          dotnet add package JwtDecoder.JwksFetcher --version "$version"
+          # Up to a minute of nuget.org indexing slack; retry a few times.
+          for i in 1 2 3 4 5; do
+            if dotnet restore --packages "$cache" --verbosity quiet; then
+              echo "OK: JwtDecoder.JwksFetcher $version + transitive Core resolve from nuget.org on attempt $i."
+              popd >/dev/null
+              rm -rf "$work" "$cache"
+              exit 0
+            fi
+            echo "Attempt $i failed; sleeping 15s..."
+            sleep 15
+          done
+          echo "::error::Lock-step release verification failed: JwtDecoder.JwksFetcher $version does not resolve from nuget.org after 5 attempts."
+          exit 1
 
       - name: Dry-run summary
         if: ${{ inputs.dry_run }}
@@ -621,7 +1010,7 @@ jobs:
   # ---------------------------------------------------------------------
   create-release:
     name: Create GitHub Release with CLI assets
-    needs: [prep, build-cli, publish-module, publish-nuget]
+    needs: [prep, build-cli, publish-module, publish-jwks-module, publish-nuget]
     if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
 

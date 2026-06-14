@@ -31,6 +31,7 @@ permissions:
 
 env:
   PROJECT: src/JwtDecoder/JwtDecoder.csproj
+  PROJECT_JWKSFETCH: src/JwksFetch/JwksFetch.csproj
   # Push and schedule events have no workflow inputs, so fall back to
   # 'Release' for non-dispatch runs.
   CONFIGURATION: ${{ inputs.configuration || 'Release' }}
@@ -49,22 +50,27 @@ jobs:
             runner: windows-latest
             rid: win-x64
             exe: jwtdecode.exe
+            jwksfetch_exe: jwksfetch.exe
           - label: windows-arm64
             runner: windows-11-arm
             rid: win-arm64
             exe: jwtdecode.exe
+            jwksfetch_exe: jwksfetch.exe
           - label: linux-x64
             runner: ubuntu-latest
             rid: linux-x64
             exe: jwtdecode
+            jwksfetch_exe: jwksfetch
           - label: linux-arm64
             runner: ubuntu-24.04-arm
             rid: linux-arm64
             exe: jwtdecode
+            jwksfetch_exe: jwksfetch
           - label: macos-arm64
             runner: macos-latest
             rid: osx-arm64
             exe: jwtdecode
+            jwksfetch_exe: jwksfetch
 
     steps:
       - name: Checkout
@@ -141,6 +147,50 @@ jobs:
         shell: pwsh
         run: ./tools/Test-AotBuild.ps1 -BinPath "${{ steps.locate.outputs.binPath }}"
 
+      # --------------------------------------------------------------
+      # Offline-guarantee verification (Phase 6).
+      # Asserts that JwtDecoder.Core.dll, the pre-AOT jwtdecode.dll, and
+      # the published native jwtdecode binary have no networking
+      # references. Four independent layers (managed IL grep via
+      # ilspycmd, native imports via dumpbin/objdump/otool, raw-bytes
+      # string scan, transitive NuGet package check) plus a SHA-256
+      # equality check between the file we inspect and the file we
+      # upload. All disassembly + imports listings are uploaded as a
+      # transparency artifact for downstream auditors.
+      # --------------------------------------------------------------
+      - name: Install ilspycmd
+        shell: pwsh
+        # Pin version for supply-chain hygiene; bump when validating a newer
+        # 10.x release of ICSharpCode/ILSpy.
+        run: dotnet tool install -g ilspycmd --version 10.1.0.8386
+
+      - name: Verify offline guarantee (jwtdecode)
+        shell: pwsh
+        run: |
+          # Ensure the global tool dir is on PATH for this step.
+          $tools = if ($IsWindows) { Join-Path $env:USERPROFILE '.dotnet\tools' } else { Join-Path $env:HOME '.dotnet/tools' }
+          $env:PATH = "$tools$([System.IO.Path]::PathSeparator)$env:PATH"
+          # The pre-AOT managed dll lives at .../net10.0/<rid>/jwtdecode.dll.
+          $managedCli = "src/JwtDecoder/bin/$env:CONFIGURATION/net10.0/${{ matrix.rid }}/jwtdecode.dll"
+          if (-not (Test-Path $managedCli)) {
+            Write-Error "pre-AOT managed assembly not found at $managedCli"
+            exit 1
+          }
+          ./tools/Verify-OfflineGuarantee.ps1 `
+            -CoreDllPath        "src/JwtDecoder.Core/bin/$env:CONFIGURATION/net8.0/JwtDecoder.Core.dll" `
+            -ManagedCliDllPath  $managedCli `
+            -AotExePath         "${{ steps.locate.outputs.binPath }}" `
+            -DisasmOutDir       "ci-artifacts/disasm-${{ matrix.rid }}" `
+            -UploadHashPath     "${{ steps.locate.outputs.binPath }}"
+
+      - name: Upload offline-guarantee transparency artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-guarantee-${{ matrix.rid }}-${{ env.CONFIGURATION }}-${{ github.sha }}
+          path: ci-artifacts/disasm-${{ matrix.rid }}
+          if-no-files-found: error
+          retention-days: 30
+
       # Mint a Sigstore-backed build provenance attestation for the binary
       # we just tested. Anyone who downloads the artifact can later run
       # `gh attestation verify <file> --owner ShikeChen-MS` to confirm it
@@ -155,5 +205,68 @@ jobs:
         with:
           name: jwtdecode-${{ matrix.rid }}-${{ env.CONFIGURATION }}-${{ github.sha }}
           path: ${{ steps.locate.outputs.binPath }}
+          if-no-files-found: error
+          retention-days: 30
+
+      # --------------------------------------------------------------
+      # jwksfetch: the network-capable companion CLI. Same matrix,
+      # same gating — `dotnet test` above must pass before we get
+      # here. Built, smoke-tested, attested, and uploaded as a
+      # SEPARATE artifact so the offline jwtdecode binary remains
+      # cleanly identifiable on its own.
+      # --------------------------------------------------------------
+
+      - name: Restore (jwksfetch)
+        shell: pwsh
+        run: dotnet restore "$env:PROJECT_JWKSFETCH" -r ${{ matrix.rid }}
+
+      - name: Publish jwksfetch (Native AOT)
+        shell: pwsh
+        run: >
+          dotnet publish "$env:PROJECT_JWKSFETCH"
+          -c $env:CONFIGURATION
+          -r ${{ matrix.rid }}
+          --no-restore
+
+      - name: Locate jwksfetch binary
+        id: locate_jwksfetch
+        shell: pwsh
+        run: |
+          $publishDir = "src/JwksFetch/bin/$env:CONFIGURATION/net10.0/${{ matrix.rid }}/publish"
+          $bin = Join-Path $publishDir '${{ matrix.jwksfetch_exe }}'
+          if (-not (Test-Path $bin)) {
+            Write-Error "Expected output not found: $bin"
+            if (Test-Path $publishDir) {
+              Get-ChildItem -Recurse $publishDir | Format-Table FullName, Length
+            }
+            exit 1
+          }
+          if ($IsLinux -or $IsMacOS) { chmod +x $bin }
+          $sizeMB = [math]::Round((Get-Item $bin).Length / 1MB, 2)
+          Write-Host "Built ${{ matrix.jwksfetch_exe }} ($sizeMB MB) for ${{ matrix.rid }}"
+          "binPath=$bin" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # Sample-driven functional tests for jwksfetch. Exercises help/version,
+      # argument validation, the --jwks-file happy path, an end-to-end pipe
+      # into jwtdecode --key-file -, HTTPS-only refusal, and kid-mismatch
+      # exit-code mapping. The artifact upload below only runs if every
+      # case passes.
+      - name: Functional tests (jwksfetch)
+        shell: pwsh
+        run: >
+          ./tools/Test-JwksFetchBuild.ps1
+          -BinPath "${{ steps.locate_jwksfetch.outputs.binPath }}"
+          -JwtDecodeBinPath "${{ steps.locate.outputs.binPath }}"
+
+      - name: Attest build provenance (jwksfetch)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.locate_jwksfetch.outputs.binPath }}
+
+      - name: Upload artifact (jwksfetch)
+        uses: actions/upload-artifact@v4
+        with:
+          name: jwksfetch-${{ matrix.rid }}-${{ env.CONFIGURATION }}-${{ github.sha }}
+          path: ${{ steps.locate_jwksfetch.outputs.binPath }}
           if-no-files-found: error
           retention-days: 30

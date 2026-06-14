@@ -120,6 +120,10 @@ If you need more control (e.g. reusing an `RSA` across many verifications, ownin
 
 `alg: none` is parseable for inspection but always returns `Verified=false` with a clearly worded security warning in `VerifyOutcome.Error`.
 
+## See also
+
+If you need to fetch the verification key from a JWKS endpoint (direct URL or via OIDC discovery), use the network‑capable companion package [`JwtDecoder.JwksFetcher`](https://www.nuget.org/packages/JwtDecoder.JwksFetcher) — released in lock‑step with this package and exact‑pinned against it. `JwtDecoder.Core` itself remains offline by construction (zero NuGet dependencies, no `System.Net.*` references). Use the companion only when your application explicitly needs to reach out for keys.
+
 ## License
 
 MIT — see [LICENSE](https://github.com/ShikeChen-MS/JwtDecoder_local_cli/blob/master/LICENSE).

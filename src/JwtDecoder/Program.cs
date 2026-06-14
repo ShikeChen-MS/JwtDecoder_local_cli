@@ -84,7 +84,10 @@ internal static class Program
                 {
                     try
                     {
-                        key = KeyLoader.Load(opts.KeyFile!, jwt.Algorithm);
+                        if (opts.KeyFromStdin)
+                            key = LoadKeyFromStdin(jwt.Algorithm);
+                        else
+                            key = KeyLoader.Load(opts.KeyFile!, jwt.Algorithm);
                     }
                     catch (FileNotFoundException ex)        { Console.Error.WriteLine($"Error: {ex.Message}"); return 2; }
                     catch (DirectoryNotFoundException ex)   { Console.Error.WriteLine($"Error: {ex.Message}"); return 2; }
@@ -154,6 +157,53 @@ internal static class Program
         finally
         {
             jwt.Dispose();
+        }
+    }
+
+    /// Reads the key material from stdin (when --key-file - is given), bounded to
+    /// <see cref="KeyLoader.MaxKeyFileBytes"/>. The temporary read buffer is zeroed
+    /// in <c>finally</c>; the bytes handed to <see cref="KeyLoader.LoadFromBytes"/>
+    /// are owned by that call and zeroed there too.
+    private static KeyMaterial LoadKeyFromStdin(string algorithm)
+    {
+        if (!Console.IsInputRedirected)
+            throw new InvalidDataException(
+                "'--key-file -' was specified but stdin is a terminal. " +
+                "Pipe the key bytes into the process, or supply a path instead of '-'.");
+
+        const int maxBytes = KeyLoader.MaxKeyFileBytes;
+        byte[] buf = new byte[Math.Min(maxBytes + 1, 64 * 1024)];
+        byte[] accumulator = new byte[Math.Min(maxBytes + 1, 64 * 1024)];
+        int total = 0;
+        try
+        {
+            using var stream = Console.OpenStandardInput();
+            int n;
+            while ((n = stream.Read(buf, 0, buf.Length)) > 0)
+            {
+                if (total + n > maxBytes)
+                    throw new InvalidDataException(
+                        $"Key bytes on stdin exceed maximum size of {maxBytes:N0} bytes.");
+                if (total + n > accumulator.Length)
+                {
+                    byte[] bigger = new byte[Math.Min(maxBytes + 1, accumulator.Length * 2)];
+                    accumulator.AsSpan(0, total).CopyTo(bigger);
+                    CryptographicOperations.ZeroMemory(accumulator);
+                    accumulator = bigger;
+                }
+                buf.AsSpan(0, n).CopyTo(accumulator.AsSpan(total));
+                total += n;
+            }
+
+            if (total == 0)
+                throw new InvalidDataException("No key bytes were read from stdin.");
+
+            return KeyLoader.LoadFromBytes(accumulator.AsSpan(0, total), algorithm);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(buf);
+            CryptographicOperations.ZeroMemory(accumulator);
         }
     }
 
