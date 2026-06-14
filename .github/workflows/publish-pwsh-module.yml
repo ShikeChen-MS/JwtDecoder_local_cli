@@ -324,6 +324,80 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      # --------------------------------------------------------------
+      # jwksfetch: the network-capable companion CLI. Same matrix,
+      # same gating - the `dotnet test` step above must pass before we
+      # get here. Renamed for release, attested, uploaded under
+      # cli-release-jwksfetch-<rid> so the existing
+      # `pattern: cli-release-*` selector in the create-release job
+      # picks it up alongside jwtdecode.
+      # --------------------------------------------------------------
+
+      - name: Restore (jwksfetch)
+        shell: pwsh
+        run: dotnet restore "$env:PROJECT_JWKSFETCHER" -r ${{ matrix.rid }}
+
+      - name: Publish jwksfetch (Native AOT)
+        shell: pwsh
+        run: >
+          dotnet publish "$env:PROJECT_JWKSFETCHER"
+          -c Release
+          -r ${{ matrix.rid }}
+          --no-restore
+
+      - name: Locate jwksfetch binary
+        id: locate_jwksfetch
+        shell: pwsh
+        run: |
+          $publishDir = "src/JwksFetch/bin/Release/net10.0/${{ matrix.rid }}/publish"
+          $exe = if ('${{ matrix.exe }}'.EndsWith('.exe')) { 'jwksfetch.exe' } else { 'jwksfetch' }
+          $bin = Join-Path $publishDir $exe
+          if (-not (Test-Path $bin)) {
+            Write-Error "Expected output not found: $bin"
+            if (Test-Path $publishDir) { Get-ChildItem -Recurse $publishDir | Format-Table FullName, Length }
+            exit 1
+          }
+          if ($IsLinux -or $IsMacOS) { chmod +x $bin }
+          $sizeMB = [math]::Round((Get-Item $bin).Length / 1MB, 2)
+          Write-Host "Built $exe ($sizeMB MB) for ${{ matrix.rid }}"
+          "binPath=$bin" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Functional tests (jwksfetch)
+        shell: pwsh
+        run: >
+          ./tools/Test-JwksFetchBuild.ps1
+          -BinPath "${{ steps.locate_jwksfetch.outputs.binPath }}"
+          -JwtDecodeBinPath "${{ steps.locate.outputs.binPath }}"
+
+      - name: Rename jwksfetch to release-friendly asset name
+        id: rename_jwksfetch
+        shell: pwsh
+        run: |
+          $version  = '${{ needs.prep.outputs.version }}'
+          $src      = '${{ steps.locate_jwksfetch.outputs.binPath }}'
+          $hasExt   = '${{ matrix.exe }}'.EndsWith('.exe')
+          $ext      = if ($hasExt) { '.exe' } else { '' }
+          $assetName = "jwksfetch-$version-${{ matrix.rid }}$ext"
+          $assetPath = Join-Path $env:RUNNER_TEMP $assetName
+          Copy-Item -LiteralPath $src -Destination $assetPath -Force
+          if ($IsLinux -or $IsMacOS) { chmod +x $assetPath }
+          Write-Host "Asset: $assetPath"
+          "assetPath=$assetPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "assetName=$assetName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Attest build provenance (jwksfetch)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.rename_jwksfetch.outputs.assetPath }}
+
+      - name: Upload jwksfetch CLI asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-release-jwksfetch-${{ matrix.rid }}
+          path: ${{ steps.rename_jwksfetch.outputs.assetPath }}
+          if-no-files-found: error
+          retention-days: 7
+
   # ---------------------------------------------------------------------
   # Job 4: publish the module to PSGallery. Gated by the
   # `powershell-gallery` GitHub Environment (manual approval, tag-only
