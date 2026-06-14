@@ -117,9 +117,14 @@ jobs:
       # also abort every downstream publish. Runs the full Core + CLI parser
       # suite even though this job only builds the PS module — the cmdlets
       # call straight through to Core, so Core coverage protects the module.
+      #
+      # `-m:1` limits MSBuild to a single worker process to avoid a race
+      # where multiple test projects rebuild the shared JwtDecoder.Core
+      # in parallel and collide writing its intermediate dll / deps.json
+      # (reproduces on .NET SDK 10.0.301).
       - name: Run unit tests (dotnet test)
         shell: pwsh
-        run: dotnet test -c Release --logger "console;verbosity=normal"
+        run: dotnet test -c Release --logger "console;verbosity=normal" -m:1
 
       - name: Restore
         shell: pwsh
@@ -219,9 +224,11 @@ jobs:
             8.0.x
             10.0.x
 
+      # `-m:1` — see comment on the matching test step in the publish-module
+      # job above for the GenerateDepsFile race on shared JwtDecoder.Core.
       - name: Run unit tests (dotnet test)
         shell: pwsh
-        run: dotnet test -c Release --logger "console;verbosity=normal"
+        run: dotnet test -c Release --logger "console;verbosity=normal" -m:1
 
       - name: Restore
         shell: pwsh
@@ -353,9 +360,12 @@ jobs:
       # Tests run on every CLI matrix entry BEFORE the AOT publish so a
       # platform-specific crypto regression (e.g. an ECDsa difference between
       # OS providers) fails the job before any binary is built or attested.
+      #
+      # `-m:1` — see comment on the matching test step in the publish-module
+      # job above for the GenerateDepsFile race on shared JwtDecoder.Core.
       - name: Run unit tests (dotnet test)
         shell: pwsh
-        run: dotnet test -c Release --logger "console;verbosity=normal"
+        run: dotnet test -c Release --logger "console;verbosity=normal" -m:1
 
       - name: Restore
         shell: pwsh

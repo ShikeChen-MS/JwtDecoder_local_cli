@@ -60,9 +60,14 @@ jobs:
       # Run the full unit-test suite BEFORE any module publish or artifact
       # upload. The PS module cmdlets call straight through to JwtDecoder.Core,
       # so a Core regression must fail this job before the .psd1 is staged.
+      #
+      # `-m:1` limits MSBuild to a single worker process to avoid a race
+      # where multiple test projects rebuild the shared JwtDecoder.Core
+      # in parallel and collide writing its intermediate dll / deps.json
+      # (reproduces on .NET SDK 10.0.301).
       - name: Run unit tests (dotnet test)
         shell: pwsh
-        run: dotnet test -c $env:CONFIGURATION --logger "console;verbosity=normal"
+        run: dotnet test -c $env:CONFIGURATION --logger "console;verbosity=normal" -m:1
 
       - name: Restore
         shell: pwsh

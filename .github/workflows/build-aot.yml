@@ -101,9 +101,16 @@ jobs:
       # upload. A failure here aborts the job and the artifact step never
       # runs, so a regression cannot ship. Runs on every platform so a
       # platform-specific crypto regression cannot slip past one runner.
+      #
+      # `-m:1` limits MSBuild to a single worker process to avoid a race
+      # where multiple test projects rebuild the shared JwtDecoder.Core
+      # in parallel and collide writing its intermediate dll / deps.json
+      # (reproduces on .NET SDK 10.0.301 Linux and Windows runners).
+      # Tests within a project still parallelise via xunit so wall-clock
+      # cost is negligible (build ~6s on a 16-core runner).
       - name: Run unit tests (dotnet test)
         shell: pwsh
-        run: dotnet test -c $env:CONFIGURATION --logger "console;verbosity=normal"
+        run: dotnet test -c $env:CONFIGURATION --logger "console;verbosity=normal" -m:1
 
       - name: Restore
         shell: pwsh
