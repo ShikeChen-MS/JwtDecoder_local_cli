@@ -270,7 +270,49 @@ public class FinalReviewFixesTests
             AllowPrivateProxy = false,
         };
 
-        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+        // Round-6 #4: strengthen the assertion. Previously this test only
+        // checked the exception TYPE (InvalidDataException), which is also
+        // thrown by the HTTPS-only scheme check. After F4's call to the
+        // HTTPS-required overload, the test was passing for the WRONG
+        // reason — a scheme refusal, not the loopback-IP refusal we
+        // actually want to verify. Asserting on message content prevents
+        // future regressions where IsForbiddenAddress stops firing for
+        // 127.0.0.1 and the test silently keeps passing.
+        var ex = await Assert.ThrowsAsync<InvalidDataException>(async () =>
             await JwksClient.FetchAsync(new Uri("https://example.com/keys"), opts));
+        Assert.Contains("127.0.0.1", ex.Message);
+        Assert.Contains("deny-list", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task NoAllowPrivateProxy_AcceptsPublicHttpProxy()
+    {
+        // Round-6 #4: a public-IP http:// proxy (legitimate enterprise
+        // forward proxy) must NOT be refused at input validation. The
+        // F4 fix used the HTTPS-only AssertHostnameAllowed overload,
+        // which threw "scheme must be 'https'" for ALL http:// proxies
+        // — breaking the documented escape hatch for non-private public
+        // forward proxies. The fix (requireHttps:false on the proxy code
+        // path) makes this test pass by reaching the network layer.
+        var opts = new FetcherOptions
+        {
+            Timeout = TimeSpan.FromSeconds(2),
+            MaxResponseBytes = 64 * 1024,
+            MaxRedirects = 3,
+            ProxyMode = ProxyMode.Explicit,
+            // 8.8.8.8 is a public IP that does NOT run an HTTP proxy.
+            // Reaching it = input validation passed. Connect will fail.
+            ProxyUri = new Uri("http://8.8.8.8:65000"),
+            AllowPrivateProxy = false,
+        };
+
+        var ex = await Record.ExceptionAsync(async () =>
+            await JwksClient.FetchAsync(new Uri("https://example.com/keys"), opts));
+        Assert.NotNull(ex);
+        // The exception MUST come from the network layer, not from input
+        // validation. An InvalidDataException would mean we regressed.
+        Assert.False(ex is InvalidDataException,
+            "Public-IP http:// proxy must NOT be refused at input validation. " +
+            $"Got: {ex.GetType().Name}: {ex.Message}");
     }
 }

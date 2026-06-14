@@ -168,6 +168,16 @@ internal static class Program
             stderr.WriteLine("Network error: request timed out.");
             return 4;
         }
+        finally
+        {
+            // Bearer-token byte[] is owned by us (CLI created it from the file).
+            // Zero on every exit path — including the early returns above — so
+            // that the secret bytes don't outlive the network request that
+            // needed them. The HTTP-layer string copy is unavoidable and is
+            // documented on FetcherOptions.BearerTokenBytes (round-6 #1).
+            if (fopts.BearerTokenBytes is { Length: > 0 })
+                System.Security.Cryptography.CryptographicOperations.ZeroMemory(fopts.BearerTokenBytes);
+        }
 
         // 4. Parse + select + emit PEM.
         try

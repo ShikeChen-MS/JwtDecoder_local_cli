@@ -93,10 +93,16 @@ public static class JwksClient
             // strip on every redirect, even same-host, to prevent token leakage.
             if (options.BearerTokenBytes is { Length: > 0 } && current.Equals(originalUri))
             {
-                // The bearer bytes inevitably become a string at the header
-                // boundary; the caller's byte[] is what callers can zero.
+                // The bearer bytes are decoded to a managed string here because
+                // HttpClient's request-headers API takes a string. The string
+                // lives on the GC heap until reclaimed and CANNOT be reliably
+                // zeroed (round-6 #1 honesty fix — the FetcherOptions XmlDoc
+                // documents this limitation). We use TryAddWithoutValidation
+                // to skip the intermediate AuthenticationHeaderValue allocation
+                // and to avoid library-internal token-shape validation that
+                // would re-touch the secret characters.
                 string tokenStr = Encoding.UTF8.GetString(options.BearerTokenBytes);
-                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", tokenStr);
+                req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + tokenStr);
             }
 
             if (options.ExtraHeaders is not null && current.Equals(originalUri))
@@ -228,7 +234,12 @@ public static class JwksClient
                 if (!options.AllowPrivateProxy)
                 {
                     // Syntactic check: literal IPs in private/loopback ranges, hostname `localhost`.
-                    SsrfPolicy.AssertHostnameAllowed(options.ProxyUri, allowLoopbackForTesting: false);
+                    // Pass requireHttps:false so legitimate http://corp-proxy.example.com
+                    // is not refused on scheme grounds; scheme was validated above
+                    // (round-6 #4 — F4's call to the HTTPS-only variant was
+                    // refusing all http:// proxies, even public-IP ones).
+                    SsrfPolicy.AssertHostnameAllowed(options.ProxyUri,
+                        allowLoopbackForTesting: false, requireHttps: false);
                     // DNS check: hostname that resolves into a forbidden range.
                     // The runtime ConnectCallback below provides a second check
                     // bound to the actual TCP connection, closing the rebinding

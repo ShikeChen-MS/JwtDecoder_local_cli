@@ -818,6 +818,26 @@ jobs:
           fi
           echo "OK: $resolved_core resolved via JwtDecoder.JwksFetcher transitive dependency."
 
+          # Round-6 #3 — resolved-version match alone proves nothing: at first
+          # release no NEWER Core version exists, so a floating `[X.Y.Z, )`
+          # range would resolve identically to the exact-pin `[X.Y.Z]`. The
+          # only test that proves the EXACT-PIN SYNTAX is intact is to read
+          # the .nuspec inside the produced .nupkg directly. If MSBuild's
+          # ExactPinProjectReferenceVersions target ever breaks, the resolved
+          # check would still pass on this very release but a later release
+          # could silently pick up a malicious newer Core.
+          unzip -o "$GITHUB_WORKSPACE/nupkgs/JwtDecoder.JwksFetcher.${version}.nupkg" \
+            JwtDecoder.JwksFetcher.nuspec -d /tmp/nupkg-inspect
+          pin_pattern="<dependency id=\"JwtDecoder.Core\" version=\"[${version}]\""
+          if ! grep -qF "$pin_pattern" /tmp/nupkg-inspect/JwtDecoder.JwksFetcher.nuspec; then
+            echo "::error::nuspec is missing exact-pin '[${version}]' on JwtDecoder.Core."
+            echo "Expected substring: $pin_pattern"
+            echo "Actual <dependencies> block:"
+            sed -n '/<dependencies>/,/<\/dependencies>/p' /tmp/nupkg-inspect/JwtDecoder.JwksFetcher.nuspec
+            exit 1
+          fi
+          echo "OK: .nuspec contains exact-pin '[${version}]' on JwtDecoder.Core."
+
           # Compile against the public API of both packages.
           cat > Program.cs <<'EOF'
           using JwtDecoder.Core;

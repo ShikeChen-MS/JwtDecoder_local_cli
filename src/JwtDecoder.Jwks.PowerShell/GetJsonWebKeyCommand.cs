@@ -174,6 +174,16 @@ public sealed class GetJsonWebKeyCommand : PSCmdlet
                 ErrorCategory.InvalidData, JwksUri ?? Issuer));
             return;
         }
+        finally
+        {
+            // Bearer-token byte[] is owned by us (cmdlet created it from the file).
+            // Zero on every exit path — including the ThrowTerminatingError paths
+            // above — so the secret bytes don't outlive the network request that
+            // needed them. The HTTP-layer string copy is unavoidable and is
+            // documented on FetcherOptions.BearerTokenBytes (round-6 #1).
+            if (fopts.BearerTokenBytes is { Length: > 0 })
+                CryptographicOperations.ZeroMemory(fopts.BearerTokenBytes);
+        }
 
         // --- 4. Parse, select, build the typed AsymmetricAlgorithm, emit. ---
         try

@@ -24,11 +24,25 @@ namespace JwtDecoder.JwksFetcher;
 internal static class SsrfPolicy
 {
     /// <summary>Throws <see cref="InvalidDataException"/> if the URL is not safe to dispatch.</summary>
-    public static void AssertHostnameAllowed(Uri uri, bool allowLoopbackForTesting = false)
+    /// <param name="uri">The URL to validate.</param>
+    /// <param name="allowLoopbackForTesting">
+    /// When true, addresses in <c>127.0.0.0/8</c> and <c>::1</c> and the
+    /// hostname <c>localhost</c> are permitted (test fixtures only).
+    /// </param>
+    /// <param name="requireHttps">
+    /// When true (default), the scheme MUST be <c>https</c>. Pass false from
+    /// the proxy-URL validation path, where the scheme has already been
+    /// validated (http or https acceptable for proxies; HTTPS-only applies
+    /// to the destination URL not the proxy connection itself). The split
+    /// closes round-6 #4: a public-IP <c>http://corp-proxy.example.com</c>
+    /// without --allow-private-proxy was being refused on scheme rather
+    /// than reaching the IP check.
+    /// </param>
+    public static void AssertHostnameAllowed(Uri uri, bool allowLoopbackForTesting = false, bool requireHttps = true)
     {
         ArgumentNullException.ThrowIfNull(uri);
 
-        if (!string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase))
+        if (requireHttps && !string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException($"Refusing non-HTTPS URL '{uri}': scheme must be 'https'.");
 
         string host = uri.Host;
@@ -89,6 +103,23 @@ internal static class SsrfPolicy
             if (o[0] == 0) return true;
             // 100.64.0.0/10 — carrier-grade NAT
             if (o[0] == 100 && (o[1] & 0xC0) == 64) return true;
+
+            // Round-6 #5 — defence-in-depth extensions consistent with
+            // "deny non-routable / special-purpose ranges" philosophy.
+            // Some are unlikely TCP attack vectors but a DNS-rebinding
+            // attack on a misconfigured network could land here.
+            // 224.0.0.0/4 multicast, 240.0.0.0/4 reserved + 255.255.255.255 broadcast.
+            if (o[0] >= 224) return true;
+            // 192.0.0.0/24 — IETF protocol assignments
+            if (o[0] == 192 && o[1] == 0 && o[2] == 0) return true;
+            // 192.0.2.0/24 — TEST-NET-1 (RFC 5737)
+            if (o[0] == 192 && o[1] == 0 && o[2] == 2) return true;
+            // 198.51.100.0/24 — TEST-NET-2 (RFC 5737)
+            if (o[0] == 198 && o[1] == 51 && o[2] == 100) return true;
+            // 203.0.113.0/24 — TEST-NET-3 (RFC 5737)
+            if (o[0] == 203 && o[1] == 0 && o[2] == 113) return true;
+            // 198.18.0.0/15 — benchmarking (RFC 2544)
+            if (o[0] == 198 && (o[1] == 18 || o[1] == 19)) return true;
 
             return false;
         }

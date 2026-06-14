@@ -38,10 +38,27 @@ public sealed class FetcherOptions
 
     /// <summary>
     /// Optional bearer token bytes for <c>Authorization: Bearer ...</c>.
-    /// Stored as <see cref="byte"/>[] to avoid leaking secret string instances.
-    /// The bytes are read by <c>JwksClient</c> once per fetch and never echoed
-    /// to stdout/stderr.
     /// </summary>
+    /// <remarks>
+    /// Stored as <see cref="byte"/>[] so that the CALLER owns the buffer
+    /// lifetime and can zero it via
+    /// <see cref="System.Security.Cryptography.CryptographicOperations.ZeroMemory(System.Span{byte})"/>
+    /// in a <c>finally</c> block after <see cref="JwksClient.FetchAsync"/>
+    /// returns. The CLI and PowerShell cmdlet both do exactly this
+    /// (final-review round-6 #1).
+    /// <para>
+    /// <b>Honesty notice</b>: at the HTTP layer the bytes are decoded to a
+    /// managed <see cref="string"/> because .NET's request-headers API
+    /// requires a string. That string lives on the GC heap until reclaimed
+    /// and cannot be reliably zeroed. The bearer should therefore be
+    /// treated as "exposed to managed memory" the moment
+    /// <see cref="JwksClient.FetchAsync"/> attaches it to a request.
+    /// Operationally: do not reuse a bearer token after a fetch; rotate it
+    /// (or scope it short-lived) per the issuer's policy. The bytes-only
+    /// surface here minimises the EXTRA copy on the caller side, but it
+    /// does not eliminate the in-process exposure.
+    /// </para>
+    /// </remarks>
     public byte[]? BearerTokenBytes { get; init; }
 
     /// <summary>

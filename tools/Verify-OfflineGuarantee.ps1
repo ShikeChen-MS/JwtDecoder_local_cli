@@ -106,13 +106,34 @@ function Warn([string]$Msg) {
 
 Write-Host "`n[A] Managed IL inspection (ilspycmd)" -ForegroundColor Cyan
 
-if (-not (Get-Command ilspycmd -ErrorAction SilentlyContinue)) {
+$ilspyVersion = '10.1.0.8386'
+$existingIlspy = Get-Command ilspycmd -ErrorAction SilentlyContinue
+$installedVersion = $null
+if ($existingIlspy) {
     # Pin the tool version. Supply-chain hygiene: a compromised newer
     # release of ilspycmd could silently degrade the offline-guarantee
     # verifier by emitting IL that doesn't match our forbidden patterns.
-    # Bump deliberately when validating a newer 10.x release.
-    Write-Host "  installing ilspycmd (pinned) ..." -ForegroundColor DarkGray
-    & dotnet tool install -g ilspycmd --version 10.1.0.8386 2>&1 | Out-Null
+    # Round-6 #2 — previously this script silently REUSED any pre-existing
+    # ilspycmd install regardless of version; a developer with an older /
+    # newer / compromised tool could see a false PASS. Now we always
+    # verify the actual installed version matches the pin and install
+    # over the existing tool otherwise.
+    $verOutput = & ilspycmd --version 2>$null | Out-String
+    if ($verOutput -match '\b(\d+\.\d+\.\d+(?:\.\d+)?)\b') {
+        $installedVersion = $Matches[1]
+    }
+}
+
+if (-not $existingIlspy -or $installedVersion -ne $ilspyVersion) {
+    if ($installedVersion -and $installedVersion -ne $ilspyVersion) {
+        Write-Host "  ilspycmd version mismatch ($installedVersion vs pinned $ilspyVersion) - reinstalling..." -ForegroundColor DarkGray
+    } else {
+        Write-Host "  installing ilspycmd (pinned $ilspyVersion) ..." -ForegroundColor DarkGray
+    }
+    # `dotnet tool update -g` succeeds whether or not the tool is currently
+    # installed, and pins it at the requested version. Prefer it over
+    # `install` which fails if the tool already exists.
+    & dotnet tool update -g ilspycmd --version $ilspyVersion 2>&1 | Out-Null
     $toolsDir = if ($IsWindows) {
         Join-Path $env:USERPROFILE '.dotnet\tools'
     } else {
@@ -132,6 +153,12 @@ $forbiddenIlPatterns = @(
     '\[System\.Net\.Mail',
     '\[System\.Net\.Primitives',
     '\[System\.Net\.NameResolution',
+    # Round-6 #6 — defence-in-depth: SslStream / SslPolicyErrors live here.
+    # No legitimate offline use; presence would mean someone added crypto/TLS
+    # plumbing that has no business in jwtdecode.exe.
+    '\[System\.Net\.Security',
+    # Round-6 #6 — future-proofing for HTTP/3 / QUIC types.
+    '\[System\.Net\.Quic',
     '\[System\.Web',
     'System\.Net\.WebClient',
     'System\.Net\.WebRequest',
