@@ -38,6 +38,15 @@ on:
         type: boolean
         required: true
         default: true
+      scope:
+        description: 'Which components to publish (all = PS modules + CLI + NuGet; cli-only = CLI binaries + GitHub Release; psmodule-only = PSGallery modules only)'
+        type: choice
+        required: true
+        default: all
+        options:
+          - all
+          - cli-only
+          - psmodule-only
 
 permissions:
   contents: read
@@ -47,6 +56,7 @@ env:
   PROJECT_MODULE:      src/JwtDecoder.PowerShell/JwtDecoder.PowerShell.csproj
   PROJECT_JWKS_MODULE: src/JwtDecoder.Jwks.PowerShell/JwtDecoder.Jwks.PowerShell.csproj
   PROJECT_JWKSFETCHER: src/JwtDecoder.JwksFetcher/JwtDecoder.JwksFetcher.csproj
+  PROJECT_JWKSFETCH:   src/JwksFetch/JwksFetch.csproj
   PROJECT_CLI:         src/JwtDecoder/JwtDecoder.csproj
 
 jobs:
@@ -97,6 +107,7 @@ jobs:
   validate-module:
     name: Build + test PowerShell module
     needs: prep
+    if: inputs.scope != 'cli-only'
     runs-on: windows-latest
 
     steps:
@@ -209,6 +220,7 @@ jobs:
   validate-jwks-module:
     name: Build + test JwtDecoder.Jwks PowerShell module
     needs: prep
+    if: inputs.scope != 'cli-only'
     runs-on: windows-latest
 
     steps:
@@ -305,6 +317,7 @@ jobs:
   build-cli:
     name: Build CLI ${{ matrix.label }}
     needs: prep
+    if: inputs.scope != 'psmodule-only'
     runs-on: ${{ matrix.runner }}
 
     permissions:
@@ -442,12 +455,12 @@ jobs:
 
       - name: Restore (jwksfetch)
         shell: pwsh
-        run: dotnet restore "$env:PROJECT_JWKSFETCHER" -r ${{ matrix.rid }}
+        run: dotnet restore "$env:PROJECT_JWKSFETCH" -r ${{ matrix.rid }}
 
       - name: Publish jwksfetch (Native AOT)
         shell: pwsh
         run: >
-          dotnet publish "$env:PROJECT_JWKSFETCHER"
+          dotnet publish "$env:PROJECT_JWKSFETCH"
           -c Release
           -r ${{ matrix.rid }}
           --no-restore
@@ -513,6 +526,7 @@ jobs:
   publish-module:
     name: Publish module to PowerShell Gallery
     needs: [prep, validate-module]
+    if: inputs.scope != 'cli-only'
     runs-on: windows-latest
     environment: powershell-gallery
 
@@ -648,6 +662,7 @@ jobs:
   publish-jwks-module:
     name: Publish JwtDecoder.Jwks module to PowerShell Gallery
     needs: [prep, validate-jwks-module]
+    if: inputs.scope != 'cli-only'
     runs-on: windows-latest
     environment: powershell-gallery
 
@@ -751,6 +766,7 @@ jobs:
   publish-nuget:
     name: Publish JwtDecoder.Core + JwtDecoder.JwksFetcher to nuget.org + GitHub Packages
     needs: [prep, validate-module, build-cli]
+    if: inputs.scope == 'all'
     runs-on: ubuntu-latest
     environment: powershell-gallery
 
@@ -1021,7 +1037,14 @@ jobs:
   create-release:
     name: Create GitHub Release with CLI assets
     needs: [prep, build-cli, publish-module, publish-jwks-module, publish-nuget]
-    if: ${{ !inputs.dry_run }}
+    if: |
+      always() && !cancelled() && !inputs.dry_run &&
+      inputs.scope != 'psmodule-only' &&
+      needs.prep.result == 'success' &&
+      needs.build-cli.result == 'success' &&
+      (needs.publish-module.result == 'success' || needs.publish-module.result == 'skipped') &&
+      (needs.publish-jwks-module.result == 'success' || needs.publish-jwks-module.result == 'skipped') &&
+      (needs.publish-nuget.result == 'success' || needs.publish-nuget.result == 'skipped')
     runs-on: ubuntu-latest
 
     permissions:
