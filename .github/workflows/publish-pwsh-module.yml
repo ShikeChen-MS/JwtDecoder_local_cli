@@ -1006,7 +1006,7 @@ jobs:
           EOF
           dotnet add package JwtDecoder.JwksFetcher --version "$version"
           # Up to a minute of nuget.org indexing slack; retry a few times.
-          for i in 1 2 3 4 5; do
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
             if dotnet restore --packages "$cache" --verbosity quiet; then
               echo "OK: JwtDecoder.JwksFetcher $version + transitive Core resolve from nuget.org on attempt $i."
               popd >/dev/null
@@ -1014,7 +1014,7 @@ jobs:
               exit 0
             fi
             echo "Attempt $i failed; sleeping 15s..."
-            sleep 15
+            sleep 60
           done
           echo "::error::Lock-step release verification failed: JwtDecoder.JwksFetcher $version does not resolve from nuget.org after 5 attempts."
           exit 1
